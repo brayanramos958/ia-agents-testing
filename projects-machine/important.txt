@@ -1,0 +1,19 @@
+El proyecto es un agente de aprendizaje conversacional con backend Express.js (Groq SDK) y frontend React/Vite. Funciona manteniendo memoria a corto plazo (últimos 20 intercambios) y a largo plazo (hechos y correcciones en SQLite). El agente genera respuestas con LLM, valida su confianza detectando contradicciones con conocimientos previos, y muestra métricas de confianza y uso de tokens.
+
+Archivos clave para controlar y parametrizar el agente:
+
+Backend:
+- agentService.js: Núcleo; define sendMessageToAgent donde se seleccionan parámetros (temperature, max_tokens, etc.), se construyen prompts del sistema, se llama a Groq y se procesa la respuesta con validación de confianza. Aquí se cambia cómo el agente piensa y responde.
+- validationService.js: Control de calidad; valida respuestas con score de confianza (0-1), decide si regenerar en modo estricto y genera constraints para forzar respuestas basadas solo en hechos verificados.
+- memoryService.js: Gestión del conocimiento; buildContextForLLM crea el prompt de contexto a partir de hechos de alta confianza y correcciones recientes, y maneja memoria a corto y largo plazo.
+
+Frontend:
+- SettingsPanel.jsx: Interfaz para activar modo estricto y ajustar sliders de temperature, max_tokens, top_p y selección de modelo.
+- api.js: Funciones que llaman a endpoints del backend para obtener/establecer parámetros y consultar estadísticas de tokens.
+- TokenCounter.jsx y ConfidenceBadge.jsx: Visualizan tokens usados y score de confianza.
+
+Para parametrizar más fácilmente mediante un prompt que indique qué puede/debe decir, qué no puede decir, y qué puede/no aprender del usuario, se podría:
+1. Modificar el system prompt en agentService.js (líneas 60-63) para incluir instrucciones específicas de permitido/prohibido y reglas de aprendizaje.
+2. Desactivar el almacenamiento de hechos aprendidos en memoryService.js (funciones addLearnedFact, etc.) si se quiere evitar cualquier aprendizaje del usuario.
+3. Mejorar validationService.js para rechazar respuestas que contengan temas prohibidos o que intenten aprender información no autorizada.
+Así, un solo prompt bien diseñado podría reemplazar varios ajustes de parámetros, haciendo la configuración más directa y legible.

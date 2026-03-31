@@ -1,0 +1,153 @@
+================================================================================
+PLAN DE IMPLEMENTACIÓN: AGENTE DE APRENDIZAJE CON MEMORIA
+================================================================================
+
+OBJETIVO: Crear un agente de IA que mejora sus respuestas basándose en 
+las correcciones del usuario.
+
+--------------------------------------------------------------------------------
+TECNOLOGÍAS SELECCIONADAS
+--------------------------------------------------------------------------------
+- LLM: Groq (modelo Mixtral-8x7b-32768 - gratuito y rápido)
+- Backend: Node.js + Express
+- Frontend: React (Vite)
+- Base de datos: SQLite (better-sqlite3)
+- Framework: LangChain (@langchain/community)
+
+--------------------------------------------------------------------------------
+ARQUITECTURA DEL AGENTE
+--------------------------------------------------------------------------------
+
+1. MEMORIA A CORTO PLAZO (Working Memory)
+   - Historial de conversación reciente
+   - Gestionado por LangChain's ConversationBufferMemory
+   - Mantiene los últimos N mensajes en el contexto del LLM
+
+2. MEMORIA A LARGO PLAZO (Persistent Memory)
+   - Tabla conversations: id, timestamp, user_message, agent_response
+   - Tabla corrections: id, conversation_id, user_correction, timestamp
+   - Tabla learned_facts: id, fact, source_conversation, confidence_score
+
+3. MECANISMO DE APRENDIZAJE
+   - El usuario puede corregir respuestas del agente
+   - Las correcciones se almacenan en la tabla `corrections`
+   - Antes de cada respuesta, se recuperan correcciones relevantes
+   - Se inyectan en el contexto del LLM para mejorar respuestas futuras
+   - Hechos confirmados múltiples veces → mayor confidence_score
+
+--------------------------------------------------------------------------------
+FLUJO DE TRABAJO
+--------------------------------------------------------------------------------
+
+1. Usuario envía mensaje → Frontend React → Backend API
+2. Backend recupera historial de conversación (memoria corto plazo)
+3. Backend busca correcciones/aprendizajes relevantes en SQLite
+4. Se construye prompt con: instrucciones base + historial + contexto de aprendizajes
+5. LLM (Groq/Mixtral) genera respuesta
+6. Respuesta almacenada en BD y enviada al frontend
+7. Si usuario corrige: se guarda corrección y se actualiza modelo de aprendizajes
+
+--------------------------------------------------------------------------------
+ESTRUCTURA DEL PROYECTO
+--------------------------------------------------------------------------------
+
+/home/bramos01/
+├── backend/
+│   ├── src/
+│   │   ├── config/
+│   │   │   └── database.js      # Configuración SQLite
+│   │   ├── models/
+│   │   │   ├── conversation.js  # Modelo de conversaciones
+│   │   │   ├── correction.js    # Modelo de correcciones
+│   │   │   └── learnedFacts.js  # Modelo de hechos aprendidos
+│   │   ├── services/
+│   │   │   ├── agentService.js  # Lógica del agente
+│   │   │   └── memoryService.js # Servicios de memoria
+│   │   ├── routes/
+│   │   │   └── api.js           # Rutas API REST
+│   │   └── index.js             # Entry point del servidor
+│   ├── package.json
+│   └── .env                     # Variables de entorno (GROQ_API_KEY)
+│
+├── frontend/
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── ChatWindow.jsx   # Componente principal de chat
+│   │   │   ├── Message.jsx      # Componente de mensaje
+│   │   │   └── CorrectionForm.jsx # Formulario de corrección
+│   │   ├── services/
+│   │   │   └── api.js          # Cliente API
+│   │   ├── App.jsx
+│   │   ├── App.css
+│   │   └── main.jsx
+│   ├── index.html
+│   ├── package.json
+│   └── vite.config.js
+│
+└── PLAN.txt                      # Este archivo
+
+--------------------------------------------------------------------------------
+IMPLEMENTACIÓN POR PARTES
+--------------------------------------------------------------------------------
+
+PARTE 1: BACKEND
+- [x] Planificar arquitectura
+- [ ] Crear estructura de directorios backend
+- [ ] Configurar package.json y dependencias
+- [ ] Implementar esquema de base de datos SQLite
+- [ ] Implementar modelos de datos
+- [ ] Implementar servicios de memoria (corto y largo plazo)
+- [ ] Implementar servicio del agente con LangChain
+- [ ] Crear API REST endpoints
+- [ ] Probar backend con curl o Postman
+
+PARTE 2: FRONTEND
+- [ ] Crear proyecto React con Vite
+- [ ] Implementar componentes de UI (ChatWindow, Message, etc.)
+- [ ] Implementar servicio de API cliente
+- [ ] Conectar frontend con backend
+- [ ] Probar flujo completo
+
+PARTE 3: INTEGRACIÓN Y PRUEBAS
+- [ ] Probar ciclo de corrección-aprendizaje
+- [ ] Verificar que el agente recuerda correcciones
+- [ ] Verificar mejora progresiva en respuestas
+- [ ] Documentar resultados
+
+--------------------------------------------------------------------------------
+API ENDPOINTS
+--------------------------------------------------------------------------------
+
+POST /api/chat
+   Envía un mensaje al agente
+   Body: { message: string }
+   Response: { response: string, conversationId: number }
+
+POST /api/correct
+   Envía una corrección a una respuesta del agente
+   Body: { conversationId: number, correction: string }
+   Response: { success: boolean }
+
+GET /api/conversations
+   Obtiene historial de conversaciones
+   Response: { conversations: [] }
+
+GET /api/learnings
+   Obtiene aprendizajes almacenados
+   Response: { corrections: [], learnedFacts: [] }
+
+DELETE /api/reset
+   Reinicia la memoria del agente (para pruebas)
+   Response: { success: boolean }
+
+--------------------------------------------------------------------------------
+NOTAS IMPORTANTES
+--------------------------------------------------------------------------------
+
+1. Obtener API Key de Groq: https://console.groq.com/
+2. El modelo Mixtral es gratuito con límites razonables
+3. La memoria a largo plazo usa SQLite para persistencia
+4. El aprendizaje se basa en inyección de contexto (no fine-tuning)
+5. LangChain facilita la integración con Groq
+
+================================================================================
