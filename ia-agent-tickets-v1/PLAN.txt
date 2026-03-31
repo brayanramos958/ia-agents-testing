@@ -1,0 +1,145 @@
+# Plan: ia-agent-tickets-v1
+
+## Objetivo
+Sistema de tickets para mesa de ayuda con agente IA (LangGraph) que asista en resoluciones.
+
+---
+
+## Estructura del Proyecto
+```
+ia-agent-tickets-v1/
+├── backend/          (Express + SQLite)
+└── frontend/         (React + Vite)
+```
+
+---
+
+## Schema SQLite
+
+### users
+| Campo   | Tipo   | Descripción                    |
+|---------|--------|--------------------------------|
+| id      | INTEGER PRIMARY KEY | |
+| nombre  | TEXT   | Nombre completo |
+| cargo   | TEXT   | Puesto de trabajo |
+| area    | TEXT   | Departamento |
+| correo  | TEXT   | Email |
+| rol     | TEXT   | creador / resolutor / supervisor |
+
+### tickets
+| Campo             | Tipo   | Descripción |
+|-------------------|--------|-------------|
+| id                | INTEGER PRIMARY KEY | |
+| tipo_requerimiento | TEXT   | Tipo de ticket |
+| categoria         | TEXT   | Categoría |
+| estado            | TEXT   | abierto / asignado / resuelto / cerrado |
+| asignado_a        | INTEGER FK | Usuario resolutor asignado |
+| urgencia          | TEXT   | baja / media / alta / crítica |
+| impacto           | TEXT   | bajo / medio / alto |
+| prioridad         | TEXT   | baja / media / alta / urgente |
+| resolucion        | TEXT   | Vacío (para agente después) |
+| created_at        | DATETIME | |
+| updated_at        | DATETIME | |
+
+### ticket_history
+| Campo     | Tipo   | Descripción |
+|-----------|--------|-------------|
+| id        | INTEGER PRIMARY KEY | |
+| ticket_id | INTEGER FK | Ticket relacionado |
+| accion    | TEXT   | creado / asignado / resuelto / reabierto |
+| detalle   | TEXT   | Descripción del cambio |
+| fecha     | DATETIME | |
+| user_id   | INTEGER FK | Usuario que realizó la acción |
+
+---
+
+## Roles y Permisos
+
+| Rol        | Acciones |
+|------------|----------|
+| Creador    | Crear tickets, ver mis tickets |
+| Resueltor  | Ver tickets asignados a mí, marcar como resueltos |
+| Supervisor | Ver TODOS los tickets, reasignar, reabrir |
+
+---
+
+## API Endpoints
+
+### Users
+- `GET /api/users` - Listar usuarios
+- `GET /api/users/:id` - Ver usuario
+- `GET /api/users?rol=creador` - Filtrar por rol
+
+### Tickets
+- `GET /api/tickets` - Listar tickets (con filtros)
+- `POST /api/tickets` - Crear ticket (creador)
+- `GET /api/tickets/:id` - Ver ticket
+- `PUT /api/tickets/:id` - Actualizar ticket
+- `PUT /api/tickets/:id/assign` - Asignar ticket (supervisor)
+- `PUT /api/tickets/:id/resolve` - Resolver ticket (resueltor)
+- `PUT /api/tickets/:id/reopen` - Reabrir ticket (supervisor)
+
+### History
+- `GET /api/tickets/:id/history` - Historial del ticket
+
+---
+
+## Frontend
+
+### Vistas por rol
+- **CreadorDashboard**: Crear ticket, ver mis tickets
+- **ResueltorDashboard**: Ver asignados, resolver
+- **SupervisorDashboard**: Ver todos, reasignar, reabrir
+
+### Componentes
+- TicketList.jsx
+- TicketForm.jsx
+- TicketDetail.jsx
+- UserBadge.jsx
+- RoleSelector.jsx
+
+---
+
+## Datos de Prueba
+
+### Usuarios
+1. Ana García - Soporte TI - creadorti@empresa.com - CREADOR
+2. Carlos López - Técnico TI - tecnicoti@empresa.com - RESUELTOR
+3. María Rodríguez - Supervisor TI - supervisorti@empresa.com - SUPERVISOR
+
+### Tickets (5 de ejemplo)
+- 2 abiertos
+- 1 asignado
+- 2 resueltos
+
+---
+
+## Pendiente (para después)
+- Integrar LangGraph como agente de sugerencia de resolución
+- El campo `resolucion` del ticket queda vacío para que el agente lo complete
+
+---
+
+## Archivos a crear
+
+### Backend (~8 archivos)
+- backend/src/db/database.sqlite
+- backend/src/db/initDb.js
+- backend/src/routes/users.js
+- backend/src/routes/tickets.js
+- backend/src/routes/history.js
+- backend/src/middleware/roleAuth.js
+- backend/src/index.js
+- backend/package.json
+
+### Frontend (~10 archivos)
+- frontend/src/components/TicketList.jsx
+- frontend/src/components/TicketForm.jsx
+- frontend/src/components/TicketDetail.jsx
+- frontend/src/components/UserBadge.jsx
+- frontend/src/components/RoleSelector.jsx
+- frontend/src/pages/CreadorDashboard.jsx
+- frontend/src/pages/ResueltorDashboard.jsx
+- frontend/src/pages/SupervisorDashboard.jsx
+- frontend/src/App.jsx
+- frontend/package.json
