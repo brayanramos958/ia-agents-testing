@@ -15,7 +15,7 @@ const logHistory = (ticketId, accion, detalle, userId) => {
 // GET /api/tickets - Listar tickets (con filtros opcionales)
 router.get('/', (req, res) => {
   try {
-    const { estado, urgencia, prioridad, asignado_a, categoria } = req.query;
+    const { estado, urgencia, prioridad, asignado_a, categoria, created_by } = req.query;
     
     let query = `
       SELECT t.*, u.nombre as asignado_nombre, u.cargo as asignado_cargo
@@ -44,6 +44,10 @@ router.get('/', (req, res) => {
     if (categoria) {
       query += ' AND t.categoria = ?';
       params.push(categoria);
+    }
+    if (created_by) {
+      query += ' AND t.created_by = ?';
+      params.push(created_by);
     }
     
     query += ' ORDER BY t.created_at DESC';

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import './App.css'
 import { getUsers, getTickets, getTicket, createTicket, assignTicket, resolveTicket, reopenTicket, getTicketHistory } from './services/api'
+import { sendToAgent } from './services/agentApi'
 
 function App() {
   const [users, setUsers] = useState([])
@@ -8,6 +9,15 @@ function App() {
   const [tickets, setTickets] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  
+  // Navigation state - 'tickets' or 'chat'
+  const [activeView, setActiveView] = useState('tickets')
+  
+  // Chat state
+  const [chatMessages, setChatMessages] = useState([])
+  const [chatInput, setChatInput] = useState('')
+  const [agentThreadId, setAgentThreadId] = useState(null)
+  const [agentLoading, setAgentLoading] = useState(false)
   
   // Modal state
   const [showCreateModal, setShowCreateModal] = useState(false)
@@ -56,6 +66,64 @@ function App() {
   const showError = (msg) => {
     setError(msg)
     setTimeout(() => setError(null), 5000)
+  }
+
+  // Chat functions
+  const handleSendMessage = async () => {
+    if (!chatInput.trim()) return
+    
+    const userMessage = {
+      id: Date.now(),
+      text: chatInput,
+      sender: 'user',
+      time: new Date().toISOString()
+    }
+    
+    setChatMessages(prev => [...prev, userMessage])
+    
+    const messageText = chatInput
+    setChatInput('')
+    
+    // Llamar al agente IA real
+    setAgentLoading(true)
+    try {
+      const response = await sendToAgent(
+        currentUser.id,
+        currentUser.rol,
+        messageText,
+        agentThreadId
+      )
+      
+      // Guardar el thread_id para siguientes mensajes
+      if (response.thread_id) {
+        setAgentThreadId(response.thread_id)
+      }
+      
+      const agentMessage = {
+        id: Date.now() + 1,
+        text: response.reply,
+        sender: 'agent',
+        time: new Date().toISOString()
+      }
+      setChatMessages(prev => [...prev, agentMessage])
+    } catch (err) {
+      // Mostrar error en el chat
+      const errorMessage = {
+        id: Date.now() + 1,
+        text: `Error: ${err.message}. Asegúrate de que el agente esté corriendo en http://localhost:8000`,
+        sender: 'agent',
+        time: new Date().toISOString()
+      }
+      setChatMessages(prev => [...prev, errorMessage])
+    } finally {
+      setAgentLoading(false)
+    }
+  }
+
+  // Reiniciar chat cuando cambia el usuario
+  const handleNewChat = () => {
+    setChatMessages([])
+    setAgentThreadId(null)
   }
 
   const handleCreateTicket = async (formData) => {
@@ -158,46 +226,79 @@ function App() {
         </div>
       </header>
 
+      {/* Navigation Tabs */}
       <main className="main">
-        {error && <div className="error">{error}</div>}
-
-        <div className="dashboard-header">
-          <h2>{getDashboardTitle()}</h2>
-          <p>Rol: {currentUser?.rol} • {currentUser?.cargo} • {currentUser?.area}</p>
-        </div>
-
-        <div className="actions">
-          {currentUser?.rol === 'creador' && (
-            <button className="btn btn-primary" onClick={() => setShowCreateModal(true)}>
-              + Crear Ticket
-            </button>
-          )}
-          <button className="btn btn-secondary" onClick={loadTickets}>
-            🔄 Actualizar
+        <div className="nav-tabs">
+          <button 
+            className={`nav-tab ${activeView === 'tickets' ? 'active' : ''}`}
+            onClick={() => setActiveView('tickets')}
+          >
+            🎫 Tickets
+          </button>
+          <button 
+            className={`nav-tab ${activeView === 'chat' ? 'active' : ''}`}
+            onClick={() => setActiveView('chat')}
+          >
+            💬 Chat con Agente
           </button>
         </div>
 
-        {tickets.length === 0 ? (
-          <div className="empty-state">
-            <h3>No hay tickets</h3>
-            <p>No se encontraron tickets para mostrar.</p>
+        {error && <div className="error">{error}</div>}
+
+        {activeView === 'tickets' ? (
+          <div className="tickets-view">
+            <div className="dashboard-header">
+              <h2>{getDashboardTitle()}</h2>
+              <p>Rol: {currentUser?.rol} • {currentUser?.cargo} • {currentUser?.area}</p>
+            </div>
+
+            <div className="actions">
+              {currentUser?.rol === 'creador' && (
+                <button className="btn btn-primary" onClick={() => setShowCreateModal(true)}>
+                  + Crear Ticket
+                </button>
+              )}
+              <button className="btn btn-secondary" onClick={loadTickets}>
+                🔄 Actualizar
+              </button>
+            </div>
+
+            {tickets.length === 0 ? (
+              <div className="empty-state">
+                <h3>No hay tickets</h3>
+                <p>No se encontraron tickets para mostrar.</p>
+              </div>
+            ) : (
+              <div className="ticket-list">
+                {tickets.map(ticket => (
+                  <TicketCard 
+                    key={ticket.id} 
+                    ticket={ticket}
+                    currentUser={currentUser}
+                    resolutores={resolutores}
+                    onView={() => openTicketDetail(ticket)}
+                    onAssign={handleAssign}
+                    onResolve={handleResolve}
+                  />
+                ))}
+              </div>
+            )}
           </div>
-        ) : (
-          <div className="ticket-list">
-            {tickets.map(ticket => (
-              <TicketCard 
-                key={ticket.id} 
-                ticket={ticket}
-                currentUser={currentUser}
-                resolutores={resolutores}
-                onView={() => openTicketDetail(ticket)}
-                onAssign={handleAssign}
-                onResolve={handleResolve}
-              />
-            ))}
-          </div>
-        )}
+        ) : null}
       </main>
+
+      {/* Chat View - Agente IA por rol */}
+      {activeView === 'chat' && (
+        <RoleChatView 
+          currentUser={currentUser}
+          messages={chatMessages}
+          chatInput={chatInput}
+          agentLoading={agentLoading}
+          onInputChange={setChatInput}
+          onSendMessage={handleSendMessage}
+          onNewChat={handleNewChat}
+        />
+      )}
 
       {showCreateModal && (
         <CreateTicketModal 
@@ -498,6 +599,161 @@ function TicketDetailModal({ ticket, history, currentUser, resolutores, onAssign
         <div className="form-actions">
           <button className="btn btn-secondary" onClick={onClose}>Cerrar</button>
         </div>
+      </div>
+    </div>
+  )
+}
+
+// ============================================================
+// COMPONENTE ROLE CHAT VIEW - Chat con Agente IA por rol
+// ============================================================
+function RoleChatView({ currentUser, messages, chatInput, agentLoading, onInputChange, onSendMessage, onNewChat }) {
+  
+  const getRoleTitle = () => {
+    switch (currentUser?.rol) {
+      case 'creador': return '🤖 Agente IA - Crear Tickets'
+      case 'resolutor': return '🤖 Agente IA - Mis Tickets Asignados'
+      case 'supervisor': return '🤖 Agente IA - Supervisión'
+      default: return '🤖 Agente IA'
+    }
+  }
+  
+  const getRoleDescription = () => {
+    switch (currentUser?.rol) {
+      case 'creador': return 'Crea tickets y consulta los que has creado'
+      case 'resolutor': return 'Consulta y resuelve tus tickets asignados'
+      case 'supervisor': return 'Supervisa todos los tickets y asígnalos'
+      default: return 'Asistente de mesa de ayuda'
+    }
+  }
+  
+  const getWelcomeMessage = () => {
+    switch (currentUser?.rol) {
+      case 'creador': return '¡Hola! Soy tu asistente de mesa de ayuda. Puedo ayudarte a crear tickets para reportar problemas o solicitudes. ¿Qué necesitas?'
+      case 'resolutor': return '¡Hola! Soy tu asistente de mesa de ayuda. Aquí puedes ver tus tickets asignados y resolverlos. ¿En qué te puedo ayudar?'
+      case 'supervisor': return '¡Hola! Soy tu asistente de mesa de ayuda. Puedo ayudarte a supervisar todos los tickets, asignarlos y reabrirlos. ¿Qué necesitas?'
+      default: return '¡Hola! Soy tu asistente de mesa de ayuda. ¿En qué te puedo ayudar?'
+    }
+  }
+  
+  // Mostrar mensaje de bienvenida si no hay mensajes
+  const displayMessages = messages.length === 0 
+    ? [{
+        id: 'welcome',
+        text: getWelcomeMessage(),
+        sender: 'agent',
+        time: new Date().toISOString()
+      }]
+    : messages
+  
+  return (
+    <div className="role-chat-container">
+      {/* Header del chat */}
+      <div className="role-chat-header">
+        <div className="role-chat-info">
+          <h3>{getRoleTitle()}</h3>
+          <p>{getRoleDescription()}</p>
+        </div>
+        <button className="btn btn-secondary btn-sm" onClick={onNewChat}>
+          + Nueva Conversación
+        </button>
+      </div>
+      
+      {/* Lista de tickets rápidos según rol */}
+      <QuickTicketList currentUser={currentUser} />
+      
+      {/* Área de chat */}
+      <div className="role-chat-main">
+        <div className="chat-messages">
+          {displayMessages.map(msg => (
+            <div key={msg.id} className={`chat-message ${msg.sender}`}>
+              <div className="message-content">{msg.text}</div>
+              <span className="message-time">
+                {new Date(msg.time).toLocaleTimeString()}
+              </span>
+            </div>
+          ))}
+          {agentLoading && (
+            <div className="chat-message agent">
+              <div className="agent-typing">
+                🤖 Escribiendo...
+              </div>
+            </div>
+          )}
+        </div>
+        
+        <div className="chat-input-container">
+          <input 
+            type="text"
+            value={chatInput}
+            onChange={(e) => onInputChange(e.target.value)}
+            onKeyPress={(e) => e.key === 'Enter' && !agentLoading && onSendMessage()}
+            placeholder={agentLoading ? "Esperando respuesta..." : "Escribe un mensaje al agente..."}
+            disabled={agentLoading}
+          />
+          <button 
+            className="btn btn-primary" 
+            onClick={onSendMessage}
+            disabled={agentLoading || !chatInput.trim()}
+          >
+            {agentLoading ? '...' : 'Enviar'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Componente para mostrar tickets rápidos según el rol
+function QuickTicketList({ currentUser }) {
+  const [tickets, setTickets] = useState([])
+  const [loading, setLoading] = useState(false)
+  
+  useEffect(() => {
+    if (currentUser) {
+      loadQuickTickets()
+    }
+  }, [currentUser])
+  
+  const loadQuickTickets = async () => {
+    setLoading(true)
+    try {
+      let filters = {}
+      if (currentUser.rol === 'creador') {
+        filters = { created_by: currentUser.id }
+      } else if (currentUser.rol === 'resolutor') {
+        filters = { asignado_a: currentUser.id }
+      }
+      // Supervisores ven todos, no cargamos aquí
+      
+      if (Object.keys(filters).length > 0) {
+        const data = await getTickets(filters)
+        setTickets(data.slice(0, 5)) // Solo primeros 5
+      }
+    } catch (err) {
+      console.error('Error loading tickets:', err)
+    } finally {
+      setLoading(false)
+    }
+  }
+  
+  if (currentUser?.rol === 'supervisor') return null // Supervisores no ven esto
+  
+  if (loading) return <div className="quick-tickets-loading">Cargando tickets...</div>
+  
+  if (tickets.length === 0) return null
+  
+  return (
+    <div className="quick-tickets">
+      <h4>Tus Tickets</h4>
+      <div className="quick-tickets-list">
+        {tickets.map(ticket => (
+          <div key={ticket.id} className="quick-ticket-item">
+            <span className={`badge badge-estado ${ticket.estado}`}>{ticket.estado}</span>
+            <span className="quick-ticket-id">#{ticket.id}</span>
+            <span className="quick-ticket-type">{ticket.tipo_requerimiento}</span>
+          </div>
+        ))}
       </div>
     </div>
   )

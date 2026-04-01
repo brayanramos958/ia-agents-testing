@@ -1,145 +1,397 @@
 # Plan: ia-agent-tickets-v1
 
 ## Objetivo
-Sistema de tickets para mesa de ayuda con agente IA (LangGraph) que asista en resoluciones.
+Sistema de tickets para mesa de ayuda con agente IA (LangGraph + LangChain) integrado
+por rol. El agente actúa como intermediario conversacional: guía al creador para abrir
+tickets, asiste al resolutor para consultar y cerrar los suyos, y acompaña al supervisor
+en el monitoreo y reasignación.
 
 ---
 
 ## Estructura del Proyecto
 ```
 ia-agent-tickets-v1/
-├── backend/          (Express + SQLite)
-└── frontend/         (React + Vite)
+├── backend/          (Express + SQLite — fuente de verdad de los tickets)
+├── agent/            (Python — microservicio LangGraph/LangChain)
+└── frontend/         (React + Vite — UI por rol + chat de agente)
 ```
 
 ---
 
-## Schema SQLite
+## Schema SQLite (estado actual — backend/src/db/initDb.js)
 
 ### users
-| Campo   | Tipo   | Descripción                    |
-|---------|--------|--------------------------------|
-| id      | INTEGER PRIMARY KEY | |
-| nombre  | TEXT   | Nombre completo |
-| cargo   | TEXT   | Puesto de trabajo |
-| area    | TEXT   | Departamento |
-| correo  | TEXT   | Email |
-| rol     | TEXT   | creador / resolutor / supervisor |
+| Campo   | Tipo                | Descripción                     |
+|---------|---------------------|---------------------------------|
+| id      | INTEGER PRIMARY KEY |                                 |
+| nombre  | TEXT                | Nombre completo                 |
+| cargo   | TEXT                | Puesto de trabajo               |
+| area    | TEXT                | Departamento                    |
+| correo  | TEXT                | Email único                     |
+| rol     | TEXT                | creador / resueltor / supervisor |
 
 ### tickets
-| Campo             | Tipo   | Descripción |
-|-------------------|--------|-------------|
-| id                | INTEGER PRIMARY KEY | |
-| tipo_requerimiento | TEXT   | Tipo de ticket |
-| categoria         | TEXT   | Categoría |
-| estado            | TEXT   | abierto / asignado / resuelto / cerrado |
-| asignado_a        | INTEGER FK | Usuario resolutor asignado |
-| urgencia          | TEXT   | baja / media / alta / crítica |
-| impacto           | TEXT   | bajo / medio / alto |
-| prioridad         | TEXT   | baja / media / alta / urgente |
-| resolucion        | TEXT   | Vacío (para agente después) |
-| created_at        | DATETIME | |
-| updated_at        | DATETIME | |
+| Campo              | Tipo                | Descripción                              |
+|--------------------|---------------------|------------------------------------------|
+| id                 | INTEGER PRIMARY KEY |                                          |
+| tipo_requerimiento | TEXT                | Incidente / Solicitud / Problema         |
+| categoria          | TEXT                | Hardware / Software / Red / Seguridad    |
+| descripcion        | TEXT                | Descripción libre del problema           |
+| estado             | TEXT                | abierto / asignado / resuelto / cerrado  |
+| asignado_a         | INTEGER FK          | Usuario resolutor asignado               |
+| urgencia           | TEXT                | baja / media / alta / critica            |
+| impacto            | TEXT                | bajo / medio / alto                      |
+| prioridad          | TEXT                | baja / media / alta / urgente            |
+| resolucion         | TEXT                | Texto de resolución                      |
+| created_by         | INTEGER FK          | Usuario que creó el ticket               |
+| created_at         | DATETIME            |                                          |
+| updated_at         | DATETIME            |                                          |
 
 ### ticket_history
-| Campo     | Tipo   | Descripción |
-|-----------|--------|-------------|
-| id        | INTEGER PRIMARY KEY | |
-| ticket_id | INTEGER FK | Ticket relacionado |
-| accion    | TEXT   | creado / asignado / resuelto / reabierto |
-| detalle   | TEXT   | Descripción del cambio |
-| fecha     | DATETIME | |
-| user_id   | INTEGER FK | Usuario que realizó la acción |
+| Campo     | Tipo                | Descripción                               |
+|-----------|---------------------|-------------------------------------------|
+| id        | INTEGER PRIMARY KEY |                                           |
+| ticket_id | INTEGER FK          | Ticket relacionado                        |
+| accion    | TEXT                | creado / asignado / resuelto / reabierto / actualizado |
+| detalle   | TEXT                | Descripción del cambio                    |
+| fecha     | DATETIME            |                                           |
+| user_id   | INTEGER FK          | Usuario que realizó la acción             |
 
 ---
 
 ## Roles y Permisos
 
-| Rol        | Acciones |
-|------------|----------|
-| Creador    | Crear tickets, ver mis tickets |
-| Resueltor  | Ver tickets asignados a mí, marcar como resueltos |
-| Supervisor | Ver TODOS los tickets, reasignar, reabrir |
+| Rol        | Acciones en UI clásica                    | Acciones vía Agente IA                              |
+|------------|-------------------------------------------|-----------------------------------------------------|
+| Creador    | Crear tickets, ver mis tickets            | Crear ticket por conversación guiada, ver mis tickets |
+| Resolutor  | Ver asignados, resolver                   | Consultar asignados, resolver por conversación      |
+| Supervisor | Ver todos, reasignar, reabrir             | Consultar estado general, supervisar (fase 2)       |
 
 ---
 
-## API Endpoints
+## API Endpoints — Backend Express (Node.js :3001)
 
 ### Users
-- `GET /api/users` - Listar usuarios
-- `GET /api/users/:id` - Ver usuario
-- `GET /api/users?rol=creador` - Filtrar por rol
+- `GET  /api/users`           — Listar todos los usuarios
+- `GET  /api/users/:id`       — Ver un usuario
+- `GET  /api/users?rol=X`     — Filtrar por rol
 
 ### Tickets
-- `GET /api/tickets` - Listar tickets (con filtros)
-- `POST /api/tickets` - Crear ticket (creador)
-- `GET /api/tickets/:id` - Ver ticket
-- `PUT /api/tickets/:id` - Actualizar ticket
-- `PUT /api/tickets/:id/assign` - Asignar ticket (supervisor)
-- `PUT /api/tickets/:id/resolve` - Resolver ticket (resueltor)
-- `PUT /api/tickets/:id/reopen` - Reabrir ticket (supervisor)
+- `GET  /api/tickets`                — Listar tickets (con filtros: estado, urgencia, asignado_a, created_by…)
+- `POST /api/tickets`                — Crear ticket (rol: creador)
+- `GET  /api/tickets/:id`            — Ver ticket detallado
+- `PUT  /api/tickets/:id`            — Actualizar campos base (rol: creador / supervisor)
+- `PUT  /api/tickets/:id/assign`     — Asignar ticket (rol: supervisor)
+- `PUT  /api/tickets/:id/resolve`    — Resolver ticket (rol: resolutor)
+- `PUT  /api/tickets/:id/reopen`     — Reabrir ticket (rol: supervisor)
 
 ### History
-- `GET /api/tickets/:id/history` - Historial del ticket
+- `GET  /api/tickets/:id/history`    — Historial completo del ticket
+
+### Nota sobre el agente
+El agente Python llama directamente al backend Express con los headers
+x-user-id / x-user-rol para simular al usuario actual. No se requieren
+endpoints adicionales en Express.
 
 ---
 
-## Frontend
+## Microservicio Agente IA — agent/ (Python :8000)
 
-### Vistas por rol
-- **CreadorDashboard**: Crear ticket, ver mis tickets
-- **ResueltorDashboard**: Ver asignados, resolver
-- **SupervisorDashboard**: Ver todos, reasignar, reabrir
+### Stack
+- **Python 3.11+**
+- **LangGraph** — orquestación del grafo ReAct (ciclo llm → tool → llm)
+- **LangChain** — abstracciones de LLM y herramientas (@tool)
+- **InMemorySaver** (`langgraph.checkpoint.memory`) — checkpointing por thread_id
+- **FastAPI** — servidor HTTP liviano que expone el endpoint de chat
+- **httpx** — cliente HTTP async para llamar al backend Express desde los Tools
 
-### Componentes
-- TicketList.jsx
-- TicketForm.jsx
-- TicketDetail.jsx
-- UserBadge.jsx
-- RoleSelector.jsx
+### Endpoint único
+```
+POST /agent/chat
+Body: { "user_id": 1, "user_rol": "creador", "message": "Quiero abrir un ticket" }
+Response: { "reply": "...", "thread_id": "user-1" }
+```
+
+### Arquitectura del Grafo (LangGraph — patrón ReAct)
+
+Se usa un único grafo ReAct estándar. El LLM decide qué Tools invocar
+basándose en el system prompt (que varía por rol) y los mensajes del usuario.
+NO se usa un nodo router custom; LangGraph ya maneja el ciclo de forma nativa.
+
+```
+ ┌──────────────────────────────────────────────┐
+ │             Grafo ReAct (único)              │
+ │                                              │
+ │  [START]                                     │
+ │     │                                        │
+ │     ▼                                        │
+ │  [llm_call]  ← system prompt dinámico        │
+ │     │          según user_rol                │
+ │     ▼                                        │
+ │  [should_continue?]                          │
+ │     │         │                              │
+ │     │ sí      │ no                           │
+ │     ▼         ▼                              │
+ │  [tool_node] [END → reply al frontend]       │
+ │     │                                        │
+ │     └──→ [llm_call]  (ciclo)                 │
+ │                                              │
+ └──────────────────────────────────────────────┘
+
+El system prompt se inyecta dinámicamente al inicio de cada invocación:
+- Rol "creador"   → prompt que guía la recolección de datos para el ticket
+- Rol "resolutor" → prompt que muestra tickets asignados y guía la resolución
+- Rol "supervisor"→ prompt que da visión global y permite reasignar (fase 2)
+```
+
+Ventaja del patrón ReAct vs router custom:
+- Menos código, menos nodos que mantener
+- El LLM ya sabe qué Tool usar según el prompt y la conversación
+- LangGraph maneja el ciclo llm→tool→llm de forma nativa
+- Agregar Tools nuevas no requiere modificar el grafo
+
+### Tools registradas en el agente
+
+| Tool                  | Descripción                                                 | Llama a                            | Roles que la usan     |
+|-----------------------|-------------------------------------------------------------|------------------------------------|-----------------------|
+| `create_ticket`       | Crea un ticket con los datos recolectados en el chat        | POST /api/tickets                  | creador               |
+| `get_created_tickets` | Devuelve los tickets creados por el usuario actual          | GET /api/tickets?created_by={id}   | creador               |
+| `get_my_tickets`      | Devuelve los tickets asignados al resolutor actual          | GET /api/tickets?asignado_a={id}   | resolutor             |
+| `get_ticket_detail`   | Devuelve el detalle completo de un ticket específico        | GET /api/tickets/{id}              | creador, resolutor    |
+| `resolve_ticket`      | Marca un ticket como resuelto con el texto de resolución    | PUT /api/tickets/{id}/resolve      | resolutor             |
+| `get_all_tickets`     | Lista todos los tickets (solo supervisor)                   | GET /api/tickets                   | supervisor            |
+| `assign_ticket`       | Asigna un ticket a un resolutor (solo supervisor)           | PUT /api/tickets/{id}/assign       | supervisor            |
+| `reopen_ticket`       | Reabre un ticket resuelto (solo supervisor)                 | PUT /api/tickets/{id}/reopen       | supervisor            |
+| `get_resolutores`     | Lista los usuarios con rol resolutor disponibles            | GET /api/users?rol=resueltor       | supervisor            |
+
+Nota sobre `create_ticket`: La Tool debe recolectar TODOS estos campos antes de
+ejecutarse (el system prompt del creador guía esta recolección):
+- tipo_requerimiento (Incidente / Solicitud / Problema)
+- categoria (Hardware / Software / Red / Seguridad / Otro)
+- descripcion (texto libre — obligatorio)
+- urgencia (baja / media / alta / critica)
+- impacto (bajo / medio / alto)  → el LLM puede inferirlo
+- prioridad (baja / media / alta / urgente) → el LLM puede inferirla
+
+### Flujo de conversación: ROL CREADOR
+
+1. Agente saluda: "Hola {nombre}, soy tu asistente de mesa de ayuda. ¿Qué problema tienes?"
+2. El usuario describe su problema en lenguaje natural
+3. El agente extrae tipo_requerimiento de la descripción (o pregunta si es ambiguo)
+4. El agente identifica la categoría (o pregunta si no es clara)
+5. El agente pide más detalles si la descripción es vaga
+6. El agente pregunta la urgencia: "¿Con qué urgencia necesitas esto?"
+7. El agente infiere impacto y prioridad basándose en urgencia + descripción
+8. Muestra resumen y pide confirmación: "Voy a crear el ticket con estos datos: ..."
+9. Si confirma → llama `create_ticket` → "Ticket #X creado exitosamente"
+10. Si el usuario quiere ver sus tickets → llama `get_created_tickets`
+
+### Flujo de conversación: ROL RESOLUTOR
+
+1. Agente saluda y automáticamente llama `get_my_tickets`
+2. Muestra lista: "Tienes N tickets asignados: #1 Hardware (urgente), #3 Red (media)..."
+3. El usuario puede preguntar por un ticket → llama `get_ticket_detail`
+4. El usuario dice "quiero resolver el #3" → agente pide la resolución
+5. El usuario describe la solución → agente confirma
+6. Si confirma → llama `resolve_ticket` → "Ticket #3 marcado como resuelto"
+
+### Flujo de conversación: ROL SUPERVISOR (Fase 2)
+
+1. Agente llama `get_all_tickets` y muestra resumen por estado
+2. Supervisor puede preguntar por tickets específicos o filtrar por resolutor
+3. Puede reasignar via chat → llama `get_resolutores` + `assign_ticket`
+4. Puede reabrir tickets resueltos → llama `reopen_ticket`
+
+### System Prompts por rol (agent/prompts.py)
+
+Cada rol tiene un system prompt que define:
+- Identidad del agente ("Soy el asistente de mesa de ayuda de la empresa")
+- Capacidades según el rol (qué Tools puede usar)
+- Instrucciones de recolección de datos (para el creador)
+- Formato de presentación de datos (para el resolutor)
+- Restricciones (NO inventar datos, siempre confirmar antes de crear/resolver)
+- Valores válidos para cada campo (extraídos del schema de la DB)
+
+### Memoria (LangGraph InMemorySaver)
+
+- Cada usuario tiene un `thread_id = f"user-{user_id}"`
+- `InMemorySaver` (importado de `langgraph.checkpoint.memory`) persiste el
+  historial del grafo en memoria RAM durante desarrollo
+- En producción reemplazar por `SqliteSaver` o `PostgresSaver`
+- El historial permite al agente recordar el contexto dentro de la misma sesión
+  (ej: el creador empezó a describir un problema pero no terminó aún)
+
+```python
+from langgraph.checkpoint.memory import InMemorySaver
+
+checkpointer = InMemorySaver()
+graph = builder.compile(checkpointer=checkpointer)
+
+# Cada invocación usa el thread_id del usuario
+graph.invoke(
+    {"messages": [{"role": "user", "content": user_message}]},
+    {"configurable": {"thread_id": f"user-{user_id}"}},
+)
+```
 
 ---
 
-## Datos de Prueba
+## Frontend — Cambios para integrar el chat del agente
 
-### Usuarios
-1. Ana García - Soporte TI - creadorti@empresa.com - CREADOR
-2. Carlos López - Técnico TI - tecnicoti@empresa.com - RESUELTOR
-3. María Rodríguez - Supervisor TI - supervisorti@empresa.com - SUPERVISOR
+### Nueva vista: AgentChat
+- Componente `AgentChat.jsx` — panel de chat lateral o pantalla dedicada
+- Entrada de texto + botón enviar + historial de mensajes
+- Visible para roles: creador, resolutor (y supervisor en fase 2)
+- Llama al proxy `/agent/chat` que redirige a `http://localhost:8000/agent/chat`
 
-### Tickets (5 de ejemplo)
-- 2 abiertos
-- 1 asignado
-- 2 resueltos
+### Proxy del Frontend (vite.config.js — ACTUALIZACIÓN REQUERIDA)
+```javascript
+// vite.config.js — agregar proxy para el agente
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 5173,
+    proxy: {
+      '/api': {
+        target: 'http://localhost:3001',
+        changeOrigin: true
+      },
+      '/agent': {
+        target: 'http://localhost:8000',
+        changeOrigin: true
+      }
+    }
+  }
+})
+```
+
+### Flujo de navegación por rol (actualizado)
+```
+Login (selección de usuario)
+        │
+        ├── Creador    → Dashboard (mis tickets) + botón "Abrir ticket con IA"
+        │                   └── AgentChat (flujo guiado de creación)
+        │
+        ├── Resolutor  → Dashboard (tickets asignados) + botón "Chatear con IA"
+        │                   └── AgentChat (consulta y resolución)
+        │
+        └── Supervisor → Dashboard (todos los tickets) [+ AgentChat — Fase 2]
+```
+
+### Nuevos archivos a crear en frontend/
+- `frontend/src/components/AgentChat.jsx`     — componente de chat
+- `frontend/src/services/agentApi.js`         — llamadas al microservicio Python
 
 ---
 
-## Pendiente (para después)
-- Integrar LangGraph como agente de sugerencia de resolución
-- El campo `resolucion` del ticket queda vacío para que el agente lo complete
+## Archivos a crear — agent/ (microservicio Python)
+
+```
+agent/
+├── main.py                  ← FastAPI app + endpoint POST /agent/chat
+├── graph.py                 ← Grafo ReAct con LangGraph (StateGraph + checkpointer)
+├── tools.py                 ← Todas las Tools (@tool) que llaman al backend Express
+├── prompts.py               ← System prompts dinámicos por rol
+├── requirements.txt         ← Dependencias Python
+└── .env.example             ← Variables de entorno (OPENAI_API_KEY, BACKEND_URL…)
+```
+
+Nota: se eliminó `memory.py` como archivo separado. La configuración del
+InMemorySaver es mínima (3 líneas) y va directamente en `graph.py`.
 
 ---
 
-## Archivos a crear
+## Variables de Entorno — agent/.env
 
-### Backend (~8 archivos)
-- backend/src/db/database.sqlite
-- backend/src/db/initDb.js
-- backend/src/routes/users.js
-- backend/src/routes/tickets.js
-- backend/src/routes/history.js
-- backend/src/middleware/roleAuth.js
-- backend/src/index.js
-- backend/package.json
+```
+OPENAI_API_KEY=sk-...          # o ANTHROPIC_API_KEY / GROQ_API_KEY según el LLM elegido
+BACKEND_URL=http://localhost:3001
+LLM_MODEL=gpt-4o-mini         # modelo a usar (configurable)
+```
 
-### Frontend (~10 archivos)
-- frontend/src/components/TicketList.jsx
-- frontend/src/components/TicketForm.jsx
-- frontend/src/components/TicketDetail.jsx
-- frontend/src/components/UserBadge.jsx
-- frontend/src/components/RoleSelector.jsx
-- frontend/src/pages/CreadorDashboard.jsx
-- frontend/src/pages/ResueltorDashboard.jsx
-- frontend/src/pages/SupervisorDashboard.jsx
-- frontend/src/App.jsx
-- frontend/package.json
+---
+
+## Puertos
+
+| Servicio       | Puerto | Tecnología          |
+|----------------|--------|---------------------|
+| Backend API    | 3001   | Node.js + Express   |
+| Agente IA      | 8000   | Python + FastAPI    |
+| Frontend       | 5173   | React + Vite (proxy a ambos servicios) |
+
+---
+
+## Ajustes pendientes en Backend Express
+
+### Filtro por created_by en GET /api/tickets
+El endpoint `GET /api/tickets` actualmente soporta filtros por: estado, urgencia,
+prioridad, asignado_a, categoria. Se debe agregar soporte para `created_by` para
+que la Tool `get_created_tickets` pueda filtrar los tickets del creador que los creó.
+
+Cambio necesario en `backend/src/routes/tickets.js`:
+```javascript
+// Agregar después de los filtros existentes:
+if (created_by) {
+  query += ' AND t.created_by = ?';
+  params.push(created_by);
+}
+```
+
+---
+
+## Fases de Implementación
+
+### Fase 1 — Microservicio base (agente mínimo funcional)
+- [ ] Crear `agent/` con FastAPI + dependencias (requirements.txt)
+- [ ] Implementar `tools.py` con: create_ticket, get_created_tickets,
+      get_my_tickets, get_ticket_detail, resolve_ticket
+- [ ] Implementar `prompts.py` con system prompts para creador y resolutor
+- [ ] Implementar `graph.py` con grafo ReAct + InMemorySaver
+- [ ] Implementar `main.py` con endpoint POST /agent/chat
+- [ ] Agregar filtro `created_by` en backend Express (tickets.js)
+- [ ] Probar flujo creador end-to-end via curl/httpie
+- [ ] Probar flujo resolutor end-to-end via curl/httpie
+
+### Fase 2 — Frontend: AgentChat UI
+- [ ] Crear `AgentChat.jsx` con diseño de chat moderno
+- [ ] Crear `agentApi.js` para llamar POST /agent/chat
+- [ ] Agregar proxy `/agent` en vite.config.js
+- [ ] Integrar botón "Chatear con IA" en dashboards de creador y resolutor
+- [ ] Mostrar mensajes del agente con formato enriquecido (listas, badges)
+
+### Fase 3 — Supervisor + mejoras
+- [ ] Tools para supervisor: get_all_tickets, assign_ticket, reopen_ticket,
+      get_resolutores
+- [ ] System prompt del supervisor
+- [ ] Persistencia de memoria en SQLite (SqliteSaver) para sobrevivir reinicios
+- [ ] Manejo de errores y fallbacks del agente (LLM caído, backend caído)
+- [ ] Rate limiting básico en el endpoint del agente
+
+### Fase 4 — Aprendizaje / RAG (futuro)
+- [ ] El agente aprende de tickets resueltos anteriores
+- [ ] RAG sobre historial de resoluciones para sugerir soluciones similares
+- [ ] Embeddings de tickets + búsqueda semántica (ChromaDB o pgvector)
+- [ ] Cuando el resolutor pide ayuda, el agente sugiere resoluciones basadas
+      en tickets similares ya resueltos
+
+---
+
+## Estado actual del sistema (completado)
+
+### Backend Express ✅
+- Todos los endpoints funcionando
+- Schema con: tipo_requerimiento, categoria, descripcion, urgencia, impacto,
+  prioridad, estado, asignado_a, created_by, resolucion
+- Autenticación simulada por headers: x-user-id / x-user-rol
+- Historial de acciones por ticket
+- PENDIENTE: agregar filtro created_by en GET /api/tickets
+
+### Frontend React ✅
+- Selector de usuario/rol
+- Dashboard por rol (creador, resolutor, supervisor)
+- Crear, asignar, resolver, reabrir tickets desde la UI
+- Modal de detalle con historial
+- PENDIENTE: proxy /agent en vite.config.js + AgentChat.jsx
+
+### Agente IA ⬜ (próximo paso)
+- Microservicio Python — pendiente de implementar (Fase 1)
