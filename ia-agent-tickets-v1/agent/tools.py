@@ -145,6 +145,65 @@ def get_resolutores() -> list:
         else:
             return []
 
+@tool
+def get_all_tickets() -> list:
+    """
+    Gets all tickets in the system. For supervisor use.
+    Returns all tickets regardless of state or assignment.
+    """
+    with httpx.Client() as client:
+        response = client.get(
+            f"{BACKEND_URL}/api/tickets",
+            timeout=30.0
+        )
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return []
+
+@tool
+def assign_ticket(ticket_id: int, asignado_a: int, user_id: int) -> dict:
+    """
+    Assigns a ticket to a resolutor. For supervisor use only.
+    """
+    payload = {"asignado_a": asignado_a}
+    
+    with httpx.Client() as client:
+        response = client.put(
+            f"{BACKEND_URL}/api/tickets/{ticket_id}/assign",
+            json=payload,
+            headers=get_headers(user_id, "supervisor"),
+            timeout=30.0
+        )
+        
+        if response.status_code == 200:
+            return {"success": True, "ticket": response.json()}
+        else:
+            error = response.json().get("error", "Error desconocido")
+            return {"success": False, "error": f"Error al asignar ticket: {error}"}
+
+@tool
+def reopen_ticket(ticket_id: int, motivo: str, user_id: int) -> dict:
+    """
+    Reopens a resolved ticket. For supervisor use only.
+    """
+    payload = {"motivo": motivo}
+    
+    with httpx.Client() as client:
+        response = client.put(
+            f"{BACKEND_URL}/api/tickets/{ticket_id}/reopen",
+            json=payload,
+            headers=get_headers(user_id, "supervisor"),
+            timeout=30.0
+        )
+        
+        if response.status_code == 200:
+            return {"success": True, "ticket": response.json()}
+        else:
+            error = response.json().get("error", "Error desconocido")
+            return {"success": False, "error": f"Error al reabrir ticket: {error}"}
+
 def create_tools():
     """Returns list of all available tools"""
     return [
@@ -153,5 +212,8 @@ def create_tools():
         get_my_tickets,
         get_ticket_detail,
         resolve_ticket,
-        get_resolutores
+        get_resolutores,
+        get_all_tickets,
+        assign_ticket,
+        reopen_ticket
     ]
