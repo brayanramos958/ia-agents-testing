@@ -22,17 +22,20 @@ async function fetchAgent(endpoint, options = {}) {
  * @param {number} userId - ID del usuario
  * @param {string} userRol - Rol del usuario (creador, resolutor, supervisor)
  * @param {string} message - Mensaje del usuario
- * @param {string} threadId - ID del hilo de conversación (opcional)
+ * @param {string} threadId - ID del hilo de conversación (opcional, se genera si no se proporciona)
  * @returns {Promise<{reply: string, thread_id: string}>}
  */
 export const sendToAgent = async (userId, userRol, message, threadId = null) => {
+  // Generar thread_id consistente basado en user_id si no se proporciona
+  const consistentThreadId = threadId || `user-${userId}`;
+  
   return fetchAgent('/chat', {
     method: 'POST',
     body: JSON.stringify({
       user_id: userId,
       user_rol: userRol,
       message: message,
-      thread_id: threadId
+      thread_id: consistentThreadId
     })
   });
 };

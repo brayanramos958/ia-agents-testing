@@ -1,16 +1,18 @@
 """
 FastAPI application for the IA Agent
 """
-import os
 from dotenv import load_dotenv
+# Load environment variables FIRST
+load_dotenv()
+
+import os
+import uuid
+import traceback
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from graph import create_agent, get_response
 from langchain_core.messages import HumanMessage
-
-# Load environment variables
-load_dotenv()
 
 # Initialize FastAPI app
 app = FastAPI(title="IA Agent - Mesa de Ayuda")
@@ -51,13 +53,14 @@ async def health_check():
     return {"status": "healthy", "service": "ia-agent"}
 
 @app.post("/agent/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+def chat(request: ChatRequest):
     """
     Main chat endpoint for the IA Agent.
-    Takes a message from the user and returns the agent's response.
+    Uses the provided thread_id or generates a new one for first-time users.
     """
-    # Generate thread_id if not provided
-    thread_id = request.thread_id or f"user-{request.user_id}"
+    print(f"--- NUEVA PETICIÓN: {request.message} ---")
+    # Use provided thread_id or generate a consistent one based on user_id
+    thread_id = request.thread_id if request.thread_id else f"user-{request.user_id}"
     
     try:
         # Get the agent
@@ -71,16 +74,30 @@ async def chat(request: ChatRequest):
         
         return ChatResponse(reply=reply, thread_id=thread_id)
     
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
-        # Log error and return friendly message
+        # Log the full error for debugging
+        print(f"Error processing chat: {e}")
+        print(traceback.format_exc())
+        
+        # Return user-friendly error
         error_msg = str(e)
         
-        if "API key" in error_msg.lower() or "auth" in error_msg.lower():
+        if "api_key" in error_msg.lower() or "auth" in error_msg.lower() or "groq" in error_msg.lower():
             raise HTTPException(
                 status_code=500,
-                detail="Error de configuración: API key de Groq no válida"
+                detail="Error de configuración: API key de Groq no válida o expirada"
             )
         
+        if "connection" in error_msg.lower() or "refused" in error_msg.lower():
+            raise HTTPException(
+                status_code=500,
+                detail="No se puede conectar al servidor backend. Asegúrate de que esté corriendo."
+            )
+        
+        # Generic error
         raise HTTPException(
             status_code=500,
             detail=f"Error al procesar tu mensaje: {error_msg}"
@@ -91,61 +108,3 @@ if __name__ == "__main__":
     
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run(app, host="0.0.0.0", port=port)
-
-
-# =============================================================================
-# Testing Commands
-# =============================================================================
-
-## Start the services
-
-# Terminal 1: Backend
-# cd backend && npm run dev
-
-# Terminal 2: Agent
-# cd agent && pip install -r requirements.txt
-# Set OPENAI_API_KEY in .env
-# python main.py
-
-# Terminal 3: Frontend
-# cd frontend && npm run dev
-
-## Test CREADOR Flow
-
-# Create a ticket
-# curl -X POST http://localhost:8000/agent/chat \
-#   -H "Content-Type: application/json" \
-#   -d '{
-#     "user_id": 1,
-#     "user_rol": "creador",
-#     "message": "Quiero abrir un ticket, tengo un problema con mi computadora"
-#   }'
-
-# List created tickets
-# curl -X POST http://localhost:8000/agent/chat \
-#   -H "Content-Type: application/json" \
-#   -d '{
-#     "user_id": 1,
-#     "user_rol": "creador",
-#     "message": "Quiero ver mis tickets"
-#   }'
-
-## Test RESOLUTOR Flow
-
-# View assigned tickets
-# curl -X POST http://localhost:8000/agent/chat \
-#   -H "Content-Type: application/json" \
-#   -d '{
-#     "user_id": 2,
-#     "user_rol": "resolutor",
-#     "message": "Hola, quiero ver mis tickets asignados"
-#   }'
-
-# Resolve a ticket
-# curl -X POST http://localhost:8000/agent/chat \
-#   -H "Content-Type: application/json" \
-#   -d '{
-#     "user_id": 2,
-#     "user_rol": "resolutor",
-#     "message": "Resolver ticket 1, lo arreglé reemplazando el cable de red"
-#   }'

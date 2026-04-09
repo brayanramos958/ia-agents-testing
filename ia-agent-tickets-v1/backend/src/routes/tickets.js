@@ -243,4 +243,71 @@ router.put('/:id/reopen', requireRole('supervisor'), (req, res) => {
   }
 });
 
+// DELETE /api/tickets/:id - Eliminar ticket (solo supervisor)
+router.delete('/:id', requireRole('supervisor'), (req, res) => {
+  try {
+    const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id);
+    if (!ticket) {
+      return res.status(404).json({ error: 'Ticket no encontrado' });
+    }
+    
+    // Eliminar historial primero
+    db.prepare('DELETE FROM ticket_history WHERE ticket_id = ?').run(req.params.id);
+    
+    // Eliminar el ticket
+    db.prepare('DELETE FROM tickets WHERE id = ?').run(req.params.id);
+    
+    logHistory(req.params.id, 'eliminado', `Ticket eliminado por ${req.user.id}`, req.user.id);
+    
+    res.json({ success: true, message: `Ticket #${req.params.id} eliminado` });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/tickets/resueltos - Obtener tickets resueltos (para RAG/aprendizaje)
+router.get('/resueltos/sugerencias', (req, res) => {
+  try {
+    const { categoria, tipo, q } = req.query;
+    
+    let query = `
+      SELECT t.id, t.tipo_requerimiento, t.categoria, t.descripcion, 
+             t.resolucion, t.urgencia, t.prioridad, t.created_at,
+             c.nombre as creador_nombre
+      FROM tickets t
+      LEFT JOIN users c ON t.created_by = c.id
+      WHERE t.estado = 'resuelto' AND t.resolucion IS NOT NULL AND t.resolucion != ''
+    `;
+    const params = [];
+    
+    if (categoria) {
+      query += ' AND t.categoria = ?';
+      params.push(categoria);
+    }
+    if (tipo) {
+      query += ' AND t.tipo_requerimiento = ?';
+      params.push(tipo);
+    }
+    
+    query += ' ORDER BY t.updated_at DESC LIMIT 50';
+    
+    const tickets = db.prepare(query).all(...params);
+    
+    // Si hay búsqueda libre, filtrar por similitud simple en descripción
+    if (q && q.length > 2) {
+      const searchLower = q.toLowerCase();
+      const filtrados = tickets.filter(t => 
+        t.descripcion?.toLowerCase().includes(searchLower) ||
+        t.resolucion?.toLowerCase().includes(searchLower) ||
+        t.categoria?.toLowerCase().includes(searchLower)
+      );
+      return res.json(filtrados);
+    }
+    
+    res.json(tickets);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;

@@ -16,7 +16,6 @@ function App() {
   // Chat state
   const [chatMessages, setChatMessages] = useState([])
   const [chatInput, setChatInput] = useState('')
-  const [agentThreadId, setAgentThreadId] = useState(null)
   const [agentLoading, setAgentLoading] = useState(false)
   
   // Modal state
@@ -87,17 +86,13 @@ function App() {
     // Llamar al agente IA real
     setAgentLoading(true)
     try {
+      // El backend genera un thread_id único por cada request
       const response = await sendToAgent(
         currentUser.id,
         currentUser.rol,
         messageText,
-        agentThreadId
+        null  // No necesitamos tracking de thread_id
       )
-      
-      // Guardar el thread_id para siguientes mensajes
-      if (response.thread_id) {
-        setAgentThreadId(response.thread_id)
-      }
       
       const agentMessage = {
         id: Date.now() + 1,
@@ -123,7 +118,6 @@ function App() {
   // Reiniciar chat cuando cambia el usuario
   const handleNewChat = () => {
     setChatMessages([])
-    setAgentThreadId(null)
   }
 
   const handleCreateTicket = async (formData) => {
