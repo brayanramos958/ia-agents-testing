@@ -1,7 +1,7 @@
 """
 LLM and checkpointer factory functions.
 
-build_llm()          → Groq with OpenRouter fallback
+build_llm()          → Groq primary + OpenRouter fallback on rate limit
 build_checkpointer() → InMemorySaver or SqliteSaver based on settings
 """
 
@@ -12,19 +12,45 @@ from config.settings import settings
 
 def build_llm():
     """
-    Primario: Groq llama3-8b-8192 (30K TPM — soporta el payload del agente).
-    Fallback: OpenRouter si Groq no está disponible.
+    Primario: Groq meta-llama/llama-4-scout-17b-16e-instruct.
 
-    NOTA: los modelos free de OpenRouter tienen ~1 RPM.
-    Groq con llama3-8b-8192 tiene 30K TPM — suficiente para el agente.
+    Cadena de fallback cuando Groq (o cualquier modelo previo) devuelve 429:
+      Groq → OpenRouter[0] → OpenRouter[1] → ... → OpenRouter[N]
+
+    with_fallbacks() intenta cada fallback en orden hasta que uno responde.
+    Se interceptan tanto groq.RateLimitError como openai.RateLimitError
+    para cubrir errores de rate limit en cualquier punto de la cadena.
     """
+    from groq import RateLimitError as GroqRateLimitError
+    from openai import RateLimitError as OpenAIRateLimitError, NotFoundError as OpenAINotFoundError
+
     primary = ChatGroq(
         api_key=settings.groq_api_key,
         model="meta-llama/llama-4-scout-17b-16e-instruct",
         temperature=0.1,
     )
-    print(f"[LLM] Using Groq: meta-llama/llama-4-scout-17b-16e-instruct (30K TPM)")
-    return primary
+
+    if not settings.openrouter_api_key:
+        print("[LLM] Groq: meta-llama/llama-4-scout-17b-16e-instruct (sin fallback — OPENROUTER_API_KEY no configurada)")
+        return primary
+
+    fallbacks = [
+        ChatOpenAI(
+            api_key=settings.openrouter_api_key,
+            base_url="https://openrouter.ai/api/v1",
+            model=model,
+            temperature=0.1,
+        )
+        for model in settings.openrouter_fallback_models
+    ]
+
+    names = " → ".join(settings.openrouter_fallback_models)
+    print(f"[LLM] Groq: llama-4-scout → fallbacks: {names}")
+
+    return primary.with_fallbacks(
+        fallbacks,
+        exceptions_to_handle=(GroqRateLimitError, OpenAIRateLimitError, OpenAINotFoundError),
+    )
 
 
 def build_checkpointer():
