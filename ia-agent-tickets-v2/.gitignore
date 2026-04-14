@@ -52,3 +52,5 @@ langsmith_logs/
 backend/__pycache__/
 agent/agent-v2/__pycache__/
 agent/agent-v2/.venv/
+
+ITS_Helpdesk_Docst_no_editable/

@@ -22,16 +22,18 @@ class ITicketPort(ABC):
         Expected payload keys (Odoo field names):
             asunto              str   — ticket subject/title
             descripcion         str   — full problem description
-            ticket_type_id      int   — FK to ticket type catalog
-            category_id         int   — FK to category L1
-            subcategory_id      int   — FK to category L2 (optional)
-            element_id          int   — FK to category L3 (optional)
-            urgency_id          int   — FK to urgency catalog
-            impact_id           int   — FK to impact catalog
-            priority_id         int   — FK to priority catalog
-            partner_id          int   — FK to requestor contact (optional)
-            affected_user_id    int   — FK to affected user (optional)
+            ticket_type_id      int   — FK to helpdesk.ticket.type
+            category_id         int   — FK to helpdesk.category (level 1)
+            subcategory_id      int   — FK to helpdesk.category (level 2, optional)
+            element_id          int   — FK to helpdesk.category (level 3, optional)
+            urgency_id          int   — FK to helpdesk.ticket.urgency
+            impact_id           int   — FK to helpdesk.ticket.impact
+            priority_id         int   — FK to helpdesk.ticket.priority
             system_equipment    str   — device or software name (optional)
+                                        NOTE: not a real Odoo field — adapters map
+                                        this value into descripcion as a suffix.
+            partner_id is NOT passed by the caller — each adapter resolves it
+            internally from user_id (res.users → partner_id).
 
         Returns:
             {"success": True, "ticket_name": "TCK-0001", "ticket_id": int}

@@ -2,12 +2,16 @@
 LLM and checkpointer factory functions.
 
 build_llm()          → Groq primary + OpenRouter fallback on rate limit
-build_checkpointer() → InMemorySaver or SqliteSaver based on settings
+init_checkpointer()  → async init: opens aiosqlite connection, stores instance
+build_checkpointer() → returns the initialized instance (or MemorySaver as fallback)
 """
 
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
 from config.settings import settings
+
+# Module-level holder — set once during lifespan startup
+_checkpointer_instance = None
 
 
 def build_llm():
@@ -53,20 +57,44 @@ def build_llm():
     )
 
 
+async def init_checkpointer() -> None:
+    """
+    Opens the SQLite connection asynchronously and stores a ready-to-use
+    AsyncSqliteSaver instance in _checkpointer_instance.
+
+    Must be called once during FastAPI lifespan startup before any request
+    arrives. The connection stays open for the lifetime of the process.
+
+    Falls back to MemorySaver if checkpoint_backend != "sqlite".
+    """
+    global _checkpointer_instance
+
+    if settings.checkpoint_backend == "sqlite":
+        import aiosqlite
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+        conn = await aiosqlite.connect(settings.checkpoint_db_path)
+        checkpointer = AsyncSqliteSaver(conn)
+        # AsyncSqliteSaver requires its tables to exist before first use.
+        await checkpointer.setup()
+        _checkpointer_instance = checkpointer
+        print(f"[checkpointer] AsyncSqliteSaver ready — {settings.checkpoint_db_path}")
+    else:
+        from langgraph.checkpoint.memory import MemorySaver
+        _checkpointer_instance = MemorySaver()
+        print("[checkpointer] MemorySaver ready (in-memory, lost on restart)")
+
+
 def build_checkpointer():
     """
-    Creates the conversation memory backend.
+    Returns the pre-initialized checkpointer instance.
 
-    "memory" → InMemorySaver: fast but lost on restart (dev only)
-    "sqlite" → SqliteSaver: persists across restarts (recommended)
+    Raises RuntimeError if init_checkpointer() was never awaited — this
+    means the lifespan startup did not complete before a request arrived.
     """
-    if settings.checkpoint_backend == "sqlite":
-        import sqlite3
-        from langgraph.checkpoint.sqlite import SqliteSaver
-        # from_conn_string() returns a context manager in langgraph v3+.
-        # Pass a raw connection instead to get the saver directly.
-        conn = sqlite3.connect(settings.checkpoint_db_path, check_same_thread=False)
-        return SqliteSaver(conn)
-
-    from langgraph.checkpoint.memory import MemorySaver
-    return MemorySaver()
+    if _checkpointer_instance is None:
+        raise RuntimeError(
+            "Checkpointer not initialized. "
+            "Ensure init_checkpointer() is awaited during FastAPI lifespan startup."
+        )
+    return _checkpointer_instance

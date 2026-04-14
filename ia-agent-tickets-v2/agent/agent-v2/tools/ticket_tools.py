@@ -9,8 +9,17 @@ Delete is implemented here but EXCLUDED from all tool lists.
 
 import json
 from langchain_core.tools import tool
+from tenacity import retry, stop_after_attempt, wait_exponential
 from ports.ticket_port import ITicketPort
 from ports.rag_port import IRAGPort
+
+# Patrón Resiliencia: Reintenta llamadas de red (Odoo/FastAPI) hasta 3 veces 
+# ante intermitencias. Espera de forma exponencial (2s, 4s, 8s).
+backend_retry = retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    reraise=True
+)
 
 # Injected at application startup via set_ticket_port()
 _port: ITicketPort = None
@@ -31,6 +40,7 @@ def set_rag_port_for_tickets(rag_port: IRAGPort) -> None:
 # ── Creator tools ─────────────────────────────────────────────────────────────
 
 @tool
+@backend_retry
 def create_ticket(
     asunto: str,
     descripcion: str,
@@ -61,7 +71,9 @@ def create_ticket(
         user_id: Current user's ID (required)
         subcategory_id: L2 category ID (optional)
         element_id: L3 category ID (optional)
-        system_equipment: Device or software name (optional)
+        system_equipment: Device or software name affected (optional).
+                         The adapter appends this to descripcion — it is not
+                         a standalone Odoo field.
     """
     payload = {
         "asunto": asunto,
@@ -79,6 +91,7 @@ def create_ticket(
 
 
 @tool
+@backend_retry
 def get_my_created_tickets(user_id: str) -> list:
     """
     Returns all tickets created by the current user.
@@ -90,6 +103,7 @@ def get_my_created_tickets(user_id: str) -> list:
 # ── Resolver tools ────────────────────────────────────────────────────────────
 
 @tool
+@backend_retry
 def get_my_assigned_tickets(user_id: str) -> list:
     """
     Returns all tickets currently assigned to the current resolver.
@@ -99,6 +113,7 @@ def get_my_assigned_tickets(user_id: str) -> list:
 
 
 @tool
+@backend_retry
 def resolve_ticket(
     ticket_id: str,
     motivo_resolucion: str,
@@ -135,6 +150,7 @@ def resolve_ticket(
 # ── Shared tools (all roles) ──────────────────────────────────────────────────
 
 @tool
+@backend_retry
 def get_ticket_detail(ticket_id: str, user_id: str, user_role: str) -> dict:
     """
     Returns full details of a specific ticket.
@@ -147,6 +163,7 @@ def get_ticket_detail(ticket_id: str, user_id: str, user_role: str) -> dict:
 
 
 @tool
+@backend_retry
 def update_ticket(ticket_id: str, fields_json: str, user_id: str) -> dict:
     """
     Updates specific fields of a ticket.
@@ -168,6 +185,7 @@ def update_ticket(ticket_id: str, fields_json: str, user_id: str) -> dict:
 # ── Supervisor tools ──────────────────────────────────────────────────────────
 
 @tool
+@backend_retry
 def get_all_tickets(filters_json: str = "{}") -> list:
     """
     Returns all tickets in the system. For supervisors only.
@@ -182,6 +200,7 @@ def get_all_tickets(filters_json: str = "{}") -> list:
 
 
 @tool
+@backend_retry
 def assign_ticket(
     ticket_id: str,
     assignee_id: str,
@@ -203,6 +222,7 @@ def assign_ticket(
 
 
 @tool
+@backend_retry
 def reopen_ticket(ticket_id: str, reason: str, user_id: str) -> dict:
     """
     Reopens a resolved or closed ticket.
@@ -218,6 +238,7 @@ def reopen_ticket(ticket_id: str, reason: str, user_id: str) -> dict:
 
 # ── Delete — implemented but excluded from all tool lists ─────────────────────
 
+@backend_retry
 def delete_ticket(ticket_id: str, user_id: str) -> dict:
     """Permanently deletes a ticket. Supervisor only."""
     return _port.delete_ticket(int(ticket_id), int(user_id))

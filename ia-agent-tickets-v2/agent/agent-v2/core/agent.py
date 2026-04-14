@@ -1,14 +1,20 @@
 """
 Agent factory and central wiring point.
 
-initialize_ports() — called once at startup to inject dependencies into tools
-get_tools_for_role() — returns the correct tool set for each role
-create_agent() — builds a compiled LangGraph ReAct agent
-get_response() — invokes the agent and extracts the final text reply
+initialize_ports()      — called once at startup to inject dependencies into tools
+get_tools_for_role()    — returns the correct tool set for each role
+create_agent()          — builds a compiled LangGraph ReAct agent
+get_or_create_agent()   — cached agent factory shared by all routes
+get_response()          — blocking invoke (returns full reply)
+stream_response()       — async generator: yields SSE tokens via astream_events()
 """
 
+import json
+import logging
 from langchain_core.messages import SystemMessage, HumanMessage, BaseMessage, AIMessage
 from langgraph.prebuilt import create_react_agent
+
+_log = logging.getLogger(__name__)
 
 from ports.ticket_port import ITicketPort
 from ports.rag_port import IRAGPort
@@ -36,6 +42,27 @@ _DEFAULT_PROMPT = (
     "Eres el asistente virtual de la mesa de ayuda. "
     "Por favor indica tu rol para poder ayudarte."
 )
+
+
+# ── Agent cache (shared across all API routes) ────────────────────────────────
+
+_agent_cache: dict = {}
+
+
+def get_or_create_agent(role: str):
+    """
+    Returns a compiled LangGraph ReAct agent for the given role.
+    Agents are cached at module level — one per role, shared by all routes.
+    Both /agent/chat and /agent/stream use the same instance.
+    """
+    if role not in _agent_cache:
+        tools = get_tools_for_role(role)
+        if not tools:
+            raise ValueError(
+                f"Unknown role '{role}'. Valid: creador, resueltor, supervisor"
+            )
+        _agent_cache[role] = create_agent(tools)
+    return _agent_cache[role]
 
 
 # ── Dependency injection ──────────────────────────────────────────────────────
@@ -172,7 +199,7 @@ def create_agent(tools: list):
 
 # ── Response extraction ───────────────────────────────────────────────────────
 
-def get_response(
+async def get_response(
     agent,
     user_message: str,
     thread_id: str,
@@ -180,11 +207,13 @@ def get_response(
     user_role: str,
 ) -> str:
     """
-    Invokes the agent with the user message and returns the final text reply.
+    Invokes the agent and returns the final text reply.
 
-    Handles the edge case where the last message in the graph result has tool
-    calls but no text content — scans backwards for the first AIMessage with
-    actual text content.
+    Uses ainvoke() — compatible with AsyncSqliteSaver which is required
+    for the streaming endpoint. The /agent/chat route must be async too.
+
+    Handles the edge case where the last message has tool_calls but no
+    text content — scans backwards for the first AIMessage with actual text.
     """
     prompt_fn = _PROMPT_BUILDERS.get(user_role)
     system_content = prompt_fn(user_id) if prompt_fn else _DEFAULT_PROMPT
@@ -194,7 +223,7 @@ def get_response(
         "recursion_limit": 30,
     }
 
-    result = agent.invoke(
+    result = await agent.ainvoke(
         {
             "messages": [
                 SystemMessage(content=system_content),
@@ -217,3 +246,63 @@ def get_response(
         "No pude procesar tu solicitud en este momento. "
         "Por favor intenta de nuevo."
     )
+
+
+# ── Streaming response ────────────────────────────────────────────────────────
+
+async def stream_response(
+    agent,
+    user_message: str,
+    thread_id: str,
+    user_id: int,
+    user_role: str,
+):
+    """
+    Async generator that streams the agent reply token by token via SSE.
+
+    Yields newline-delimited SSE frames:
+        data: {"t":"token","v":"Hola"}\\n\\n   — text token from LLM
+        data: {"t":"tool","v":"get_tickets"}\\n\\n — tool being executed (UX hint)
+        data: {"t":"done"}\\n\\n                — stream complete
+        data: {"t":"error","v":"..."}\\n\\n     — unrecoverable error
+
+    Frontend consumes with fetch + ReadableStream or EventSource.
+    The existing /agent/chat endpoint is unaffected — both routes share the
+    same compiled agent instance via get_or_create_agent().
+    """
+    prompt_fn = _PROMPT_BUILDERS.get(user_role)
+    system_content = prompt_fn(user_id) if prompt_fn else _DEFAULT_PROMPT
+
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": 30,
+    }
+
+    input_data = {
+        "messages": [
+            SystemMessage(content=system_content),
+            HumanMessage(content=user_message),
+        ]
+    }
+
+    try:
+        async for event in agent.astream_events(input_data, config, version="v2"):
+            kind = event["event"]
+
+            # ── Text token from LLM ──────────────────────────────────────────
+            if kind == "on_chat_model_stream":
+                chunk = event["data"]["chunk"]
+                # Skip tool_call_chunks — only stream final text tokens
+                if chunk.content and not getattr(chunk, "tool_call_chunks", None):
+                    yield f"data: {json.dumps({'t': 'token', 'v': chunk.content})}\n\n"
+
+            # ── Tool execution started — send UX hint ────────────────────────
+            elif kind == "on_tool_start":
+                tool_name = event.get("name", "tool")
+                yield f"data: {json.dumps({'t': 'tool', 'v': tool_name})}\n\n"
+
+        yield f"data: {json.dumps({'t': 'done'})}\n\n"
+
+    except Exception as exc:
+        _log.exception("stream_response error thread=%s user=%s", thread_id, user_id)
+        yield f"data: {json.dumps({'t': 'error', 'v': str(exc)})}\n\n"

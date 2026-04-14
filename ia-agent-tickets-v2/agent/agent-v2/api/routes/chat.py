@@ -9,33 +9,21 @@ Agents are lazy-initialized on first request for that role.
 import logging
 from fastapi import APIRouter, HTTPException
 from api.schemas.chat import ChatRequest, ChatResponse
-from core.agent import create_agent, get_tools_for_role, get_response
+from core.agent import get_or_create_agent, get_response
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Cache: role → compiled agent (lazy initialized)
-_agents: dict = {}
-
-
-def _get_or_create_agent(role: str):
-    if role not in _agents:
-        tools = get_tools_for_role(role)
-        if not tools:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown role '{role}'. Valid: creador, resueltor, supervisor",
-            )
-        _agents[role] = create_agent(tools)
-    return _agents[role]
-
 
 @router.post("/agent/chat", response_model=ChatResponse)
-def chat(request: ChatRequest) -> ChatResponse:
+async def chat(request: ChatRequest) -> ChatResponse:
     thread_id = request.thread_id or f"user-{request.user_id}"
-    agent = _get_or_create_agent(request.user_rol)
     try:
-        reply = get_response(
+        agent = get_or_create_agent(request.user_rol)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    try:
+        reply = await get_response(
             agent=agent,
             user_message=request.message,
             thread_id=thread_id,

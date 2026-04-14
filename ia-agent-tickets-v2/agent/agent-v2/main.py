@@ -24,14 +24,21 @@ from config.settings import settings
 from api.middleware.auth import api_key_middleware
 from api.routes.chat import router as chat_router
 from api.routes.invoke import router as invoke_router
+from api.routes.stream import router as stream_router
 from core.agent import initialize_ports
+from core.graph import init_checkpointer
 
 
 def _build_ticket_port():
     """Selects and instantiates the adapter based on BACKEND_ADAPTER env var."""
     adapter = settings.backend_adapter.lower()
 
+    if adapter == "odoo":
+        from adapters.odoo_adapter import OdooAdapter
+        return OdooAdapter()
+
     if adapter == "http":
+        # Legacy — deprecated. Use BACKEND_ADAPTER=odoo for production.
         from adapters.http_adapter import HttpAdapter
         return HttpAdapter()
 
@@ -85,6 +92,9 @@ async def lifespan(app: FastAPI):
     print("[startup] Building RAG store...")
     rag_port = _build_rag_port(ticket_port)
 
+    print("[startup] Initializing checkpointer...")
+    await init_checkpointer()
+
     print("[startup] Injecting ports into tools...")
     initialize_ports(ticket_port, rag_port)
 
@@ -115,6 +125,7 @@ app.middleware("http")(api_key_middleware)
 
 app.include_router(chat_router)
 app.include_router(invoke_router)
+app.include_router(stream_router)
 
 
 @app.get("/health", tags=["health"])

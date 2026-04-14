@@ -28,16 +28,20 @@ class Settings(BaseSettings):
     ]
 
     # ── Backend adapter ─────────────────────────────────────────────────────
-    # "express"  → ExpressAdapter (local dev, simplified schema)
-    # "http"     → HttpAdapter (production — configurable for Odoo REST API)
+    # "express"  → ExpressAdapter (local dev, simplified schema — no Odoo needed)
+    # "odoo"     → OdooAdapter (production — Odoo 15 Community JSON-RPC)
+    # "http"     → HttpAdapter (legacy — deprecated, kept as reference only)
     # "postgres" → PostgresAdapter (future — direct DB access)
     backend_adapter: str = "express"
     backend_url: str = "http://localhost:3001"
 
-    # HttpAdapter — Odoo REST API config (only needed when backend_adapter=http)
+    # OdooAdapter — Odoo 15 Community JSON-RPC (required when backend_adapter=odoo)
+    # Odoo 15 uses session auth: login + password.
+    # NOTE: API keys (Bearer token) are Odoo 17+ — do NOT use them for Odoo 15.
     odoo_base_url: str = ""
-    odoo_api_key: str = ""
     odoo_database: str = ""
+    odoo_user: str = ""        # Login del usuario de servicio (e.g. helpdesk@empresa.com)
+    odoo_password: str = ""    # Contraseña del usuario de servicio
 
     # ── RAG ─────────────────────────────────────────────────────────────────
     vector_store_path: str = "./vector_store"
@@ -71,6 +75,9 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        # extra="ignore" allows third-party env vars (e.g. LANGCHAIN_*, HF_TOKEN)
+        # to coexist in .env without causing a ValidationError at startup.
+        extra = "ignore"
 
 
 settings = Settings()
