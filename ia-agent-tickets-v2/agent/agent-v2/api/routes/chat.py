@@ -7,6 +7,7 @@ Agents are lazy-initialized on first request for that role.
 """
 
 import logging
+from datetime import date
 from fastapi import APIRouter, HTTPException
 from api.schemas.chat import ChatRequest, ChatResponse
 from core.agent import get_or_create_agent, get_response
@@ -17,7 +18,7 @@ router = APIRouter()
 
 @router.post("/agent/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest) -> ChatResponse:
-    thread_id = request.thread_id or f"user-{request.user_id}"
+    thread_id = request.thread_id or f"user-{request.user_id}-{date.today()}"
     try:
         agent = get_or_create_agent(request.user_rol)
     except ValueError as exc:

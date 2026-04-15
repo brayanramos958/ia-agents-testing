@@ -11,10 +11,47 @@ stream_response()       — async generator: yields SSE tokens via astream_event
 
 import json
 import logging
+import asyncio
 from langchain_core.messages import SystemMessage, HumanMessage, BaseMessage, AIMessage
 from langgraph.prebuilt import create_react_agent
+from langgraph.prebuilt.tool_node import ToolNode
 
 _log = logging.getLogger(__name__)
+
+
+async def _fetch_creator_context(user_id: int) -> str:
+    """
+    Pre-fetches open tickets for a creador user and returns a formatted
+    context block to inject into the system prompt.
+
+    Runs the synchronous port call in a thread to avoid blocking the event loop.
+    Returns an empty string on any error so the agent can still function.
+    """
+    try:
+        from tools.ticket_tools import _port
+        if _port is None:
+            return ""
+        tickets = await asyncio.to_thread(_port.get_tickets_by_creator, user_id)
+        if not tickets:
+            return "\n\n## Historial del usuario\nSin tickets registrados."
+
+        open_tickets = [
+            t for t in tickets
+            if str(t.get("state", "")).lower() not in {"resolved", "closed", "cancelled", "resuelto", "cerrado", "cancelado"}
+        ]
+        if not open_tickets:
+            return "\n\n## Historial del usuario\nSin tickets abiertos actualmente."
+
+        lines = ["\n\n## Historial del usuario (tickets abiertos — usa esta info en el Paso 1A)"]
+        for t in open_tickets[:10]:
+            lines.append(
+                f"- {t.get('name', 'N/A')}: {t.get('subject', t.get('asunto', 'N/A'))} "
+                f"[estado: {t.get('state', 'N/A')}]"
+            )
+        return "\n".join(lines)
+    except Exception as exc:
+        _log.debug("Could not pre-fetch user tickets for context: %s", exc)
+        return ""
 
 from ports.ticket_port import ITicketPort
 from ports.rag_port import IRAGPort
@@ -180,18 +217,16 @@ def create_agent(tools: list):
             clean.append(m)
         sanitized = clean
 
-        # Debug temporal (quitar en producción)
-        import logging
-        _log = logging.getLogger(__name__)
         _log.debug("trim_hook: %d messages → sending %d", len(non_system), len(sanitized))
 
         return {"messages": system + sanitized}
 
     llm = build_llm()
     checkpointer = build_checkpointer()
+    tool_node = ToolNode(tools, handle_tool_errors=True)
     return create_react_agent(
         model=llm,
-        tools=tools,
+        tools=tool_node,
         checkpointer=checkpointer,
         pre_model_hook=_trim_hook,
     )
@@ -218,10 +253,35 @@ async def get_response(
     prompt_fn = _PROMPT_BUILDERS.get(user_role)
     system_content = prompt_fn(user_id) if prompt_fn else _DEFAULT_PROMPT
 
+    if user_role == "creador":
+        tickets_ctx = await _fetch_creator_context(user_id)
+        system_content = system_content + tickets_ctx
+
     config = {
         "configurable": {"thread_id": thread_id},
         "recursion_limit": 30,
     }
+
+    # ── Detect corrupted thread (orphaned tool_calls from a crashed session) ──
+    # When a session crashes mid-tool-call, the checkpoint stores an AIMessage
+    # with tool_calls but no corresponding ToolMessage. On the next request,
+    # LangGraph routes to the tools node BEFORE pre_model_hook can clean it up,
+    # causing "INVALID_CHAT_HISTORY". We detect and reset the thread proactively.
+    try:
+        state = await agent.aget_state(config)
+        if state and state.values.get("messages"):
+            last_msg = state.values["messages"][-1]
+            if isinstance(last_msg, AIMessage) and getattr(last_msg, "tool_calls", None):
+                import time as _time
+                fresh_thread = f"{thread_id}-r{int(_time.time())}"
+                _log.warning(
+                    "Thread %s has orphaned tool_calls (crashed session) — "
+                    "resetting to fresh thread %s",
+                    thread_id, fresh_thread,
+                )
+                config = {"configurable": {"thread_id": fresh_thread}, "recursion_limit": 30}
+    except Exception as _state_err:
+        _log.debug("Could not inspect thread state: %s", _state_err)
 
     result = await agent.ainvoke(
         {
@@ -273,10 +333,27 @@ async def stream_response(
     prompt_fn = _PROMPT_BUILDERS.get(user_role)
     system_content = prompt_fn(user_id) if prompt_fn else _DEFAULT_PROMPT
 
+    if user_role == "creador":
+        tickets_ctx = await _fetch_creator_context(user_id)
+        system_content = system_content + tickets_ctx
+
     config = {
         "configurable": {"thread_id": thread_id},
         "recursion_limit": 30,
     }
+
+    # Same orphaned tool_calls guard as get_response
+    try:
+        state = await agent.aget_state(config)
+        if state and state.values.get("messages"):
+            last_msg = state.values["messages"][-1]
+            if isinstance(last_msg, AIMessage) and getattr(last_msg, "tool_calls", None):
+                import time as _time
+                fresh_thread = f"{thread_id}-r{int(_time.time())}"
+                _log.warning("stream: orphaned tool_calls on %s → %s", thread_id, fresh_thread)
+                config = {"configurable": {"thread_id": fresh_thread}, "recursion_limit": 30}
+    except Exception as _state_err:
+        _log.debug("stream: could not inspect thread state: %s", _state_err)
 
     input_data = {
         "messages": [

@@ -2,67 +2,102 @@
 
 ---
 
-## Estado actual — 2026-04-10
+## Estado actual — 2026-04-14
 
-### Lo que ya está implementado en `agent-v2/`
+### ✅ Implementado y funcionando (probado en desarrollo)
 
-- [x] Estructura hexagonal completa (ports / adapters / tools / prompts / api)
-- [x] `config/settings.py` — Pydantic Settings, single source of truth
-- [x] `ports/ticket_port.py` — ITicketPort con nombres Odoo
-- [x] `ports/rag_port.py` — IRAGPort + SuggestionResult
-- [x] `adapters/express_adapter.py` — adapter de desarrollo contra Express + SQLite
-- [x] `adapters/http_adapter.py` — stub presente, **pendiente implementación completa**
-- [x] `rag/store.py` — ChromaDB seeding desde API REST (nunca SQLite directo)
-- [x] `rag/embeddings.py` — HuggingFace singleton
-- [x] `tools/ticket_tools.py` — create, get, resolve, assign, reopen, update, delete (excluido)
-- [x] `tools/user_tools.py` — catálogos: tipos, categorías 3 niveles, urgencia, impacto, prioridad, etapas
-- [x] `tools/rag_tools.py` — suggest_solution_before_ticket + record_agent_feedback
-- [x] `prompts/creator.py` — flujo resolución-primero, categorización jerárquica L1→L2→L3
-- [x] `prompts/resolver.py` — sugerencias proactivas (con bug de SLA — ver abajo)
-- [x] `prompts/supervisor.py` — gestión general, delete deshabilitado
-- [x] `feedback/collector.py` — evaluación del agente AI (distinto al CSAT del ticket)
-- [x] `core/graph.py` — Groq primario + OpenRouter fallback + SqliteSaver
-- [x] `core/agent.py` — inicialización de ports, tool sets por rol, extracción de respuesta
-- [x] `api/routes/chat.py` — POST /agent/chat (stateful por thread_id)
-- [x] `api/routes/invoke.py` — POST /agent/invoke (A2A stateless)
-- [x] `api/middleware/auth.py` — X-Agent-Key
-- [x] `main.py` — lifespan con RAG seeding resiliente (fix aplicado: crash si backend no está)
-- [x] `pyproject.toml` + `uv.lock` — gestionado con uv
-- [x] `Dockerfile`
+| Archivo | Estado | Notas |
+|---|---|---|
+| `config/settings.py` | ✅ funcionando | Pydantic Settings, single source of truth |
+| `ports/ticket_port.py` | ✅ funcionando | ITicketPort con nombres Odoo |
+| `ports/rag_port.py` | ✅ funcionando | IRAGPort + SuggestionResult |
+| `adapters/express_adapter.py` | ✅ funcionando | Adapter de desarrollo contra Express + SQLite |
+| `rag/store.py` | ✅ funcionando | ChromaDB seeding desde API REST |
+| `rag/embeddings.py` | ✅ funcionando | HuggingFace singleton `all-MiniLM-L6-v2` |
+| `tools/ticket_tools.py` | ✅ funcionando | create, get, resolve, assign, reopen, update (delete excluido) |
+| `tools/user_tools.py` | ✅ funcionando | catálogos: tipos, categorías 3 niveles, urgencia, impacto, prioridad |
+| `tools/rag_tools.py` | ✅ funcionando | suggest_solution_before_ticket + record_agent_feedback |
+| `prompts/creator.py` | ✅ funcionando | flujo resolución-primero, categorización L1→L2→L3 |
+| `prompts/resolver.py` | ✅ actualizado | verifica `approval_status` antes de resolver; bloquea si pending/rejected |
+| `prompts/supervisor.py` | ✅ actualizado | priorización visual por `is_about_to_expire` y `sla_status` |
+| `feedback/collector.py` | ✅ funcionando | SQLite-backed, evaluación del agente AI (≠ CSAT del ticket) |
+| `core/graph.py` | ✅ funcionando | Groq primario + OpenRouter fallback + AsyncSqliteSaver |
+| `core/agent.py` | ✅ actualizado | `_trim_hook` limpia contexto; imports duplicados eliminados |
+| `api/routes/chat.py` | ✅ actualizado | sesión diaria: `thread_id = user-{id}-{date.today()}` |
+| `api/routes/stream.py` | ✅ nuevo | POST /agent/stream — SSE token a token via `astream_events` |
+| `api/routes/invoke.py` | ✅ funcionando | POST /agent/invoke — A2A stateless sin LLM |
+| `api/middleware/auth.py` | ✅ funcionando | X-Agent-Key |
+| `main.py` | ✅ funcionando | lifespan con RAG seeding resiliente |
+| `pyproject.toml` + `uv.lock` | ✅ funcionando | gestionado con uv |
 
-### Bugs conocidos (encontrados en sesión 2026-04-10)
+---
 
-- [x] **FIXED** — `main.py`: crash al startup si Express no está corriendo (RAG seeding sin try/except)
-- [ ] **PENDING** — `prompts/resolver.py`: promete mostrar `sla_status` y `deadline_date` que Express no tiene
-- [ ] **PENDING** — `get_ticket_detail` no devuelve historial (`ticket_history` existe en Express pero no se expone en `GET /api/tickets/:id`)
-- [ ] **PENDING** — No existe `add_note_to_ticket` tool ni endpoint en Express
+### ⚠️ Implementado pero SIN PROBAR en producción (requiere acceso Odoo API)
 
-### Pendiente para poder probar en desarrollo
+| Archivo | Estado | Qué falta verificar |
+|---|---|---|
+| `adapters/odoo_adapter.py` | ⚠️ implementado, no probado | JSON-RPC 2.0 contra Odoo 15; necesita credenciales reales |
+| `_text_to_html()` en odoo_adapter | ⚠️ implementado, no probado | Odoo requiere HTML en campos `fields.Html`; no se ha verificado en Odoo real |
+| `usuario_solicitante_id` en `create_ticket` | ⚠️ implementado, no probado | Se envía explícitamente; en Odoo lo setea `@api.onchange`, no JSON-RPC |
+| `system_equipment` como campo real | ⚠️ implementado, no probado | Es `Char(tracking=True)` en custom, se envía como campo standalone |
+| `reopen_ticket` con historial | ⚠️ implementado, no probado | Lee `motivo_resolucion` actual y lo preserva con `<hr/>` separator |
+| `approval_status` en `get_ticket_detail` | ⚠️ implementado, no probado | Agregado a fields list; depende de que Odoo lo retorne |
+| Campos SLA (`sla_status`, `deadline_date`, `is_about_to_expire`) | ⚠️ implementado, no probado | Stored=True en Odoo; verificar que JSON-RPC los devuelva |
 
-- [ ] **Backend Express** — Modificar `GET /api/tickets/:id` para incluir historial
-- [ ] **Backend Express** — Agregar `POST /api/tickets/:id/notes`
-- [ ] **Backend Express** — Ampliar CHECK de `accion` en `ticket_history` para incluir `'nota'`
-- [ ] **agent-v2** — Implementar tool `add_note_to_ticket` en `tools/ticket_tools.py`
-- [ ] **agent-v2** — Actualizar `ExpressAdapter` para soportar historial y notas
-- [ ] **agent-v2** — Corregir `prompts/resolver.py` (quitar promesas de SLA, agregar historial)
+---
 
-### Pendiente Fase 2 — Producción Odoo
+### ❌ Pendiente / No implementado
 
-- [ ] Agregar `odoo_login: str = ""` a `config/settings.py` (falta para header `X-Odoo-Login`)
-- [ ] Implementar `HttpAdapter` completo contra API Odoo REST
-- [ ] Mapear Chatter de `GET /helpdesk/api/v1/ticket/{id}` a historial del agente
-- [ ] Ajustar filtros: Odoo filtra por `name` y `stage_id`, no por `created_by`/`asignado_a`
-- [ ] Soporte de paginación (`limit`/`offset`) en `get_all_tickets`
-- [ ] Tool `add_note_to_ticket` compatible con Odoo Chatter
+#### En el agente (sin tocar backend):
+- [ ] **Historial del usuario en contexto** — antes de sugerir solución, llamar `get_my_created_tickets` y avisar si hay ticket similar abierto en los últimos 7 días (`prompts/creator.py`)
+- [ ] **Resumen de conversación en el ticket** — la descripción del ticket debe incluir lo que el usuario dijo con sus palabras, no solo lo que el LLM infirió (`prompts/creator.py`)
+- [ ] **Detección de incidentes masivos** — tool `check_similar_open_tickets()` que alerte si >2 usuarios reportaron el mismo problema en 24h (`tools/ticket_tools.py`, `prompts/creator.py`, `prompts/supervisor.py`)
+- [ ] **Métricas de deflexión** — endpoint `GET /agent/metrics` con deflection_rate, avg_satisfaction, tickets_deflected (`api/routes/metrics.py`, `feedback/collector.py`)
+- [ ] **Escalación a humano** — detectar frustración del usuario y crear ticket urgente con nota interna (`prompts/base.py`, `prompts/creator.py`)
+- [ ] **Tool `add_note_to_ticket`** — agregar nota interna a un ticket existente (`tools/ticket_tools.py`)
+
+#### Requieren cambios en Express backend (desarrollo):
+- [ ] `GET /api/tickets/:id` — incluir historial de acciones
+- [ ] `POST /api/tickets/:id/notes` — agregar notas internas
+- [ ] CHECK de `accion` en `ticket_history` — ampliar para incluir `'nota'`
+
+#### Requieren acceso a Odoo API en producción:
+- [ ] **Knowledge base de Odoo** — integrar `helpdesk.knowledge` como segunda fuente de RAG (`ports/ticket_port.py`, `adapters/odoo_adapter.py`, `tools/rag_tools.py`)
+- [ ] Verificar paginación (`limit`/`offset`) en `get_all_tickets` contra Odoo real
+- [ ] Verificar mapping del Chatter de Odoo (`log_ids`/`x_private_note_ids`) a historial del agente
+- [ ] `http_adapter.py` — sigue siendo stub; solo `odoo_adapter.py` está implementado
+
+#### Requieren servicios externos (Fase 3):
+- [ ] **Alertas proactivas de SLA** — background task + email/Slack/webhook
+- [ ] **Multi-canal** — WhatsApp Business API / Teams / Slack
+- [ ] **Soporte de adjuntos/imágenes** — upload endpoint + Llama 4 Scout multimodal (ya instalado)
+
+---
+
+### Bugs corregidos en esta sesión (2026-04-14)
+
+| Bug | Archivo | Fix aplicado |
+|---|---|---|
+| Campos `fields.Html` rechazados por Odoo sin HTML | `odoo_adapter.py` | `_text_to_html()` wrappea texto plano en `<p>` |
+| `system_equipment` concatenado a `descripcion` | `odoo_adapter.py` | Se envía como campo standalone |
+| `reopen_ticket` borraba historial previo | `odoo_adapter.py` | Lee y preserva `motivo_resolucion` anterior |
+| `_trim_hook` tenía `import logging` y `_log` duplicados dentro de la función | `core/agent.py` | Eliminados — ya existen a nivel módulo |
+| Sesión permanente acumulaba contexto indefinidamente | `chat.py`, `stream.py` | `thread_id = user-{id}-{date.today()}` |
+| `prompts/resolver.py` no verificaba `approval_status` | `prompts/resolver.py` | Bloquea resolución si estado es pending o rejected |
+
+---
+
+## Nota: Adaptadores
+
+> `odoo_adapter.py` usa **JSON-RPC 2.0** (`/web/dataset/call_kw`) — protocolo de Odoo 15 Community.
+> NO usa Bearer token (eso es Odoo 17+). Usa session cookie con login previo.
+>
+> `http_adapter.py` está como stub — documenta los endpoints REST (`/helpdesk/api/v1/`) pero NO está implementado.
+> El plan de producción es `odoo_adapter.py`, no `http_adapter.py`.
 
 ---
 
 ## Nota: Migración de directorio
-
-> El agente actualmente vive en `ia-agent-tickets-v1/agent-v2/`.
-> Se planea mover a un directorio propio (fuera de `ia-agent-tickets-v1/`).
-> **Antes de mover**: verificar que el `.env` y `vector_store/` y `checkpoints.db` se copien correctamente.
-> El `pyproject.toml` usa paths relativos — revisar que no haya rutas hardcodeadas.
 
 ---
 

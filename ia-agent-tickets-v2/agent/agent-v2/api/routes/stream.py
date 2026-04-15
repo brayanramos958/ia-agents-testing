@@ -20,6 +20,7 @@ Frontend usage (EventSource — GET only, not suitable for POST with body):
 """
 
 import logging
+from datetime import date
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
@@ -38,7 +39,7 @@ async def chat_stream(request: ChatRequest):
     Same auth, same roles, same conversation memory as /agent/chat.
     The thread_id links this stream to the conversation history in the checkpointer.
     """
-    thread_id = request.thread_id or f"user-{request.user_id}"
+    thread_id = request.thread_id or f"user-{request.user_id}-{date.today()}"
 
     try:
         agent = get_or_create_agent(request.user_rol)

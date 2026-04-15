@@ -14,8 +14,14 @@ Environment variables required (set in .env):
 NOTE: Odoo 15 Community does NOT have a REST API.
       All operations go through JSON-RPC 2.0 on /web/dataset/call_kw.
       Bearer token auth is Odoo 17+ only — do NOT use it here.
+
+ASYNC SAFETY: This adapter is synchronous (uses httpx.post).
+      LangChain's @tool decorator routes ainvoke() through run_in_executor()
+      for sync tools, so httpx calls run in a thread pool and do NOT block
+      the FastAPI/LangGraph event loop. No async rewrite is needed.
 """
 
+import html as _html
 import httpx
 from ports.ticket_port import ITicketPort
 from config.settings import settings
@@ -43,6 +49,26 @@ class OdooAdapter(ITicketPort):
         # Stage ID cache — avoids repeated lookups on every resolve/reopen
         self._resolve_stage_id: int | None = None
         self._start_stage_id: int | None = None
+
+    # ── HTML helper ──────────────────────────────────────────────────────────
+
+    def _text_to_html(self, text: str) -> str:
+        """Convierte texto plano a HTML para fields.Html de Odoo.
+
+        Odoo almacena descripcion, causa_raiz y motivo_resolucion como
+        fields.Html. Enviar texto plano rompe el renderizado en el chatter
+        y los wizards de resolución validan mínimo 10 caracteres reales.
+        """
+        if not text:
+            return ""
+        escaped = _html.escape(str(text))
+        paragraphs = escaped.split("\n\n")
+        parts = []
+        for p in paragraphs:
+            p = p.replace("\n", "<br/>").strip()
+            if p:
+                parts.append(f"<p>{p}</p>")
+        return "".join(parts) if parts else f"<p>{escaped}</p>"
 
     # ── Authentication ────────────────────────────────────────────────────────
 
@@ -181,7 +207,9 @@ class OdooAdapter(ITicketPort):
         Creates a ticket in Odoo.
 
         Resolves partner_id from user_id automatically (required field in Odoo).
-        Maps system_equipment into descripcion as a suffix if provided.
+        Sets usuario_solicitante_id explicitly (onchange doesn't fire via JSON-RPC).
+        Sends system_equipment as a standalone Char field (ITS_Helpdesk_custom).
+        Wraps text fields (descripcion) as HTML for fields.Html compatibility.
         """
         # 1. Resolve partner_id from user_id — required field in helpdesk.ticket.base
         user_data = self._call_kw(
@@ -193,27 +221,29 @@ class OdooAdapter(ITicketPort):
             return {"success": False, "error": f"User {user_id} not found in Odoo"}
         partner_id = user_data[0]["partner_id"][0]  # partner_id is [id, name] tuple
 
-        # 2. Map system_equipment → descripcion suffix (no such field in Odoo)
-        descripcion = payload.get("descripcion", "")
-        if payload.get("system_equipment"):
-            descripcion += f"\n\nEquipo/Sistema afectado: {payload['system_equipment']}"
-
-        # 3. Build Odoo-native payload
+        # 2. Build Odoo-native payload
         odoo_vals = {
-            "asunto":         payload["asunto"],
-            "descripcion":    descripcion,
-            "ticket_type_id": payload["ticket_type_id"],
-            "category_id":    payload["category_id"],
-            "urgency_id":     payload["urgency_id"],
-            "impact_id":      payload["impact_id"],
-            "priority_id":    payload["priority_id"],
-            "partner_id":     partner_id,
+            "asunto":                 payload["asunto"],
+            "descripcion":            self._text_to_html(payload.get("descripcion", "")),
+            "ticket_type_id":         payload["ticket_type_id"],
+            "category_id":            payload["category_id"],
+            "urgency_id":             payload["urgency_id"],
+            "impact_id":              payload["impact_id"],
+            "priority_id":            payload["priority_id"],
+            "partner_id":             partner_id,
+            # Fix: @api.onchange('partner_id') no dispara vía JSON-RPC.
+            # Sin este campo, el ticket no aparece en el portal del usuario.
+            "usuario_solicitante_id": user_id,
         }
         # Optional classification fields
         if payload.get("subcategory_id"):
             odoo_vals["subcategory_id"] = payload["subcategory_id"]
         if payload.get("element_id"):
             odoo_vals["element_id"] = payload["element_id"]
+        # Fix: system_equipment es un campo real en ITS_Helpdesk_custom (Char, tracking).
+        # Antes se concatenaba a descripcion porque se asumía que no existía en Odoo.
+        if payload.get("system_equipment"):
+            odoo_vals["system_equipment"] = payload["system_equipment"]
 
         # 4. Create and return
         ticket_id = self._call_kw("helpdesk.ticket.base", "create", [odoo_vals])
@@ -262,8 +292,9 @@ class OdooAdapter(ITicketPort):
                 "stage_id", "ticket_type_id", "category_id", "subcategory_id", "element_id",
                 "priority_id", "urgency_id", "impact_id",
                 "partner_id", "asignado_a", "agent_group_id",
-                "sla_id", "deadline_date", "sla_status",
+                "sla_id", "deadline_date", "sla_status", "is_about_to_expire",
                 "fecha_creacion", "fecha_cierre", "ultima_modificacion",
+                "approval_status",  # Fix: ITS_Helpdesk_custom — pending/approved/rejected
             ]},
         )
         if not tickets:
@@ -281,8 +312,8 @@ class OdooAdapter(ITicketPort):
         self._call_kw(
             "helpdesk.ticket.base", "write",
             [[ticket_id], {
-                "motivo_resolucion": motivo_resolucion,
-                "causa_raiz":        causa_raiz,
+                "motivo_resolucion": self._text_to_html(motivo_resolucion),
+                "causa_raiz":        self._text_to_html(causa_raiz),
                 "stage_id":          resolve_stage_id,
             }],
         )
@@ -306,7 +337,8 @@ class OdooAdapter(ITicketPort):
             {"fields": [
                 "name", "asunto", "stage_id", "urgency_id", "priority_id",
                 "ticket_type_id", "partner_id", "asignado_a",
-                "agent_group_id", "fecha_creacion", "sla_status",
+                "agent_group_id", "fecha_creacion",
+                "sla_status", "deadline_date", "is_about_to_expire",  # Fix: visibilidad SLA para supervisor
             ], "limit": 200},
         )
 
@@ -323,15 +355,30 @@ class OdooAdapter(ITicketPort):
     def reopen_ticket(self, ticket_id: int, reason: str, user_id: int) -> dict:
         """
         Reopens a resolved/closed ticket by moving it back to the start stage.
-        Stores the reason in motivo_resolucion for audit trail.
+        Appends the reopen reason to motivo_resolucion preserving the original
+        resolution text for audit trail.
         """
         start_stage_id = self._get_start_stage_id()
+
+        # Fix: leer el valor actual antes de sobrescribir para preservar el historial.
+        # Sobrescribir motivo_resolucion borraba la resolución original — rompe audit trail.
+        current = self._call_kw(
+            "helpdesk.ticket.base", "read",
+            [[ticket_id]],
+            {"fields": ["motivo_resolucion"]},
+        )
+        original = current[0].get("motivo_resolucion", "") if current else ""
+        separator = "<hr/><p><strong>--- Resolución anterior ---</strong></p>" if original else ""
+        new_motivo = (
+            f"<p><strong>Reabierto:</strong> {_html.escape(reason)}</p>"
+            f"{separator}{original}"
+        )
 
         self._call_kw(
             "helpdesk.ticket.base", "write",
             [[ticket_id], {
                 "stage_id":          start_stage_id,
-                "motivo_resolucion": f"Reabierto: {reason}",
+                "motivo_resolucion": new_motivo,
                 "fecha_cierre":      False,
             }],
         )

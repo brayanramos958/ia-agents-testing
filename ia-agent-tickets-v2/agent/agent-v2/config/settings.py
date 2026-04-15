@@ -16,14 +16,11 @@ class Settings(BaseSettings):
     # Modelos free de OpenRouter usados como cadena de fallback cuando Groq hace rate limit.
     # Se intentan en orden — si uno falla con 429, se pasa al siguiente.
     # Verificados en OpenRouter API (abril 2026) — todos soportan tool calling y son gratuitos.
-    # Verificados en OpenRouter API (abril 2026) — todos soportan tool calling y son gratuitos.
     openrouter_fallback_models: List[str] = [
         "meta-llama/llama-3.3-70b-instruct:free",
         "nvidia/nemotron-3-super-120b-a12b:free",
         "openai/gpt-oss-120b:free",
         "openai/gpt-oss-20b:free",
-        "nvidia/nemotron-3-nano-30b-a3b:free",
-        "qwen/qwen3-coder:free",
         "google/gemma-4-31b-it:free",
     ]
 

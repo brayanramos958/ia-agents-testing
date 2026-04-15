@@ -26,6 +26,34 @@ _port: ITicketPort = None
 _rag_port: IRAGPort = None
 
 
+def _resolve_id(value: str, field: str, catalog_fn) -> int:
+    """
+    Resolves a catalog field value to a numeric ID.
+
+    - If value is already numeric: converts and returns directly (zero overhead).
+    - If value is a name string: searches the catalog by name (case-insensitive)
+      and returns the matching ID without an extra LLM round-trip.
+    - If the name is not found in the catalog: raises ValueError with the
+      available options so the error is actionable.
+    """
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        items = catalog_fn()
+        name_lower = str(value).lower().strip()
+        match = next(
+            (item for item in items if item.get("name", "").lower().strip() == name_lower),
+            None,
+        )
+        if match:
+            return match["id"]
+        available = [item.get("name", "") for item in items]
+        raise ValueError(
+            f"'{field}': '{value}' no es un ID numérico ni coincide con ningún valor "
+            f"del catálogo. Opciones disponibles: {available}"
+        )
+
+
 def set_ticket_port(port: ITicketPort) -> None:
     global _port
     _port = port
@@ -78,13 +106,13 @@ def create_ticket(
     payload = {
         "asunto": asunto,
         "descripcion": descripcion,
-        "ticket_type_id": int(ticket_type_id),
-        "category_id": int(category_id),
-        "subcategory_id": int(subcategory_id) if subcategory_id else None,
-        "element_id": int(element_id) if element_id else None,
-        "urgency_id": int(urgency_id),
-        "impact_id": int(impact_id),
-        "priority_id": int(priority_id),
+        "ticket_type_id": _resolve_id(ticket_type_id, "ticket_type_id", _port.get_ticket_types),
+        "category_id":    _resolve_id(category_id,    "category_id",    _port.get_categories),
+        "subcategory_id": _resolve_id(subcategory_id, "subcategory_id", _port.get_categories) if subcategory_id else None,
+        "element_id":     _resolve_id(element_id,     "element_id",     _port.get_categories) if element_id     else None,
+        "urgency_id":     _resolve_id(urgency_id,     "urgency_id",     _port.get_urgency_levels),
+        "impact_id":      _resolve_id(impact_id,      "impact_id",      _port.get_impact_levels),
+        "priority_id":    _resolve_id(priority_id,    "priority_id",    _port.get_priority_levels),
         "system_equipment": system_equipment,
     }
     return _port.create_ticket(payload, int(user_id))
