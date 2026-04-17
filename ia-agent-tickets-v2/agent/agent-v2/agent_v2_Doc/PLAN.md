@@ -2,33 +2,36 @@
 
 ---
 
-## Estado actual — 2026-04-14
+## Estado actual — 2026-04-17 (última revisión)
+
+> **Tests**: `scratch/test_improvements.py` (30 tests) + `scratch/test_bugs_ab.py` (9 tests) — todos verdes.
 
 ### ✅ Implementado y funcionando (probado en desarrollo)
 
 | Archivo | Estado | Notas |
 |---|---|---|
-| `config/settings.py` | ✅ funcionando | Pydantic Settings, single source of truth |
-| `ports/ticket_port.py` | ✅ funcionando | ITicketPort con nombres Odoo |
-| `ports/rag_port.py` | ✅ funcionando | IRAGPort + SuggestionResult |
-| `adapters/express_adapter.py` | ✅ funcionando | Adapter de desarrollo contra Express + SQLite |
-| `rag/store.py` | ✅ funcionando | ChromaDB seeding desde API REST |
-| `rag/embeddings.py` | ✅ funcionando | HuggingFace singleton `all-MiniLM-L6-v2` |
-| `tools/ticket_tools.py` | ✅ funcionando | create, get, resolve, assign, reopen, update (delete excluido) |
-| `tools/user_tools.py` | ✅ funcionando | catálogos: tipos, categorías 3 niveles, urgencia, impacto, prioridad |
-| `tools/rag_tools.py` | ✅ funcionando | suggest_solution_before_ticket + record_agent_feedback |
-| `prompts/creator.py` | ✅ funcionando | flujo resolución-primero, categorización L1→L2→L3 |
-| `prompts/resolver.py` | ✅ actualizado | verifica `approval_status` antes de resolver; bloquea si pending/rejected |
-| `prompts/supervisor.py` | ✅ actualizado | priorización visual por `is_about_to_expire` y `sla_status` |
-| `feedback/collector.py` | ✅ funcionando | SQLite-backed, evaluación del agente AI (≠ CSAT del ticket) |
-| `core/graph.py` | ✅ funcionando | Groq primario + OpenRouter fallback + AsyncSqliteSaver |
-| `core/agent.py` | ✅ actualizado | `_trim_hook` limpia contexto; imports duplicados eliminados |
-| `api/routes/chat.py` | ✅ actualizado | sesión diaria: `thread_id = user-{id}-{date.today()}` |
-| `api/routes/stream.py` | ✅ nuevo | POST /agent/stream — SSE token a token via `astream_events` |
-| `api/routes/invoke.py` | ✅ funcionando | POST /agent/invoke — A2A stateless sin LLM |
-| `api/middleware/auth.py` | ✅ funcionando | X-Agent-Key |
-| `main.py` | ✅ funcionando | lifespan con RAG seeding resiliente |
-| `pyproject.toml` + `uv.lock` | ✅ funcionando | gestionado con uv |
+| `config/settings.py` | ✅ | Pydantic Settings, single source of truth. Fallbacks limpiados: removidos `qwen3-coder` y `nemotron-nano` |
+| `ports/ticket_port.py` | ✅ | ITicketPort con nombres Odoo |
+| `ports/rag_port.py` | ✅ | IRAGPort + SuggestionResult. `SolutionItem` incluye `causa_raiz`. `add_resolved_ticket` acepta `causa_raiz` con default `""` (backwards compat) |
+| `adapters/express_adapter.py` | ✅ | Adapter de desarrollo contra Express + SQLite |
+| `rag/store.py` | ✅ | ChromaDB seeding desde API REST. `causa_raiz` embebida en `document_text` y metadata. `search_similar` retorna `causa_raiz` en cada resultado |
+| `rag/embeddings.py` | ✅ | HuggingFace singleton `all-MiniLM-L6-v2` |
+| `tools/ticket_tools.py` | ✅ | create, get, resolve, assign, reopen, update. `_resolve_id()` convierte nombres LLM → IDs de catálogo sin round-trip extra. `resolve_ticket` pasa `causa_raiz` al RAG en tiempo real. Retry con `tenacity` (3 intentos, backoff exponencial 2s→10s) |
+| `tools/user_tools.py` | ✅ | catálogos: tipos, categorías 3 niveles, urgencia, impacto, prioridad |
+| `tools/rag_tools.py` | ✅ | `suggest_solution_before_ticket` expone `causa_raiz` al LLM. `record_agent_feedback` |
+| `prompts/base.py` | ✅ | Frustración → ticket urgente + contacto humano. Reglas anti-prompt-injection (Capa 1) |
+| `prompts/creator.py` | ✅ | Historial inyectado en contexto. Paso 1B hardware (pasos de verificación). Paso 1B software (explicación proceso aprobación 4 pasos). Descripción en 3ra persona con voz del usuario |
+| `prompts/resolver.py` | ✅ | Tickets agrupados por SLA. Verifica `approval_status`. Guía `motivo_resolucion` + `causa_raiz` |
+| `prompts/supervisor.py` | ✅ | Resumen ejecutivo al iniciar. Priorización visual por SLA |
+| `feedback/collector.py` | ✅ | SQLite-backed, evaluación del agente AI (≠ CSAT del ticket) |
+| `core/graph.py` | ✅ | Groq primario + OpenRouter fallback + AsyncSqliteSaver |
+| `core/agent.py` | ✅ | `_trim_hook` (ventana 12 msgs, saneado de huérfanos, **solo conserva último SystemMessage**). `_fetch_creator_context` inyecta historial en system prompt (**cacheado por thread_id**). `_prepare_invocation` elimina lógica duplicada entre `/chat` y `/stream`. Detección de thread corrupto con `aget_state()`. `invalidate_creator_context()` para limpiar cache explícitamente |
+| `api/routes/chat.py` | ✅ | sesión diaria: `thread_id = user-{id}-{date.today()}` |
+| `api/routes/stream.py` | ✅ | POST /agent/stream — SSE token a token via `astream_events` |
+| `api/routes/invoke.py` | ✅ | POST /agent/invoke — A2A stateless sin LLM |
+| `api/middleware/auth.py` | ✅ | X-Agent-Key |
+| `main.py` | ✅ | lifespan con RAG seeding resiliente |
+| `pyproject.toml` + `uv.lock` | ✅ | gestionado con uv |
 
 ---
 
@@ -36,7 +39,7 @@
 
 | Archivo | Estado | Qué falta verificar |
 |---|---|---|
-| `adapters/odoo_adapter.py` | ⚠️ implementado, no probado | JSON-RPC 2.0 contra Odoo 15; necesita credenciales reales |
+| `adapters/odoo_adapter.py` | ⚠️ implementado, no probado en prod | JSON-RPC 2.0 contra Odoo 15. 8 fixes de producción aplicados: re-auth automático en sesión expirada, `_text_to_html` con escape HTML completo, retry en `_call_kw`. Necesita credenciales reales para validar |
 | `_text_to_html()` en odoo_adapter | ⚠️ implementado, no probado | Odoo requiere HTML en campos `fields.Html`; no se ha verificado en Odoo real |
 | `usuario_solicitante_id` en `create_ticket` | ⚠️ implementado, no probado | Se envía explícitamente; en Odoo lo setea `@api.onchange`, no JSON-RPC |
 | `system_equipment` como campo real | ⚠️ implementado, no probado | Es `Char(tracking=True)` en custom, se envía como campo standalone |
@@ -46,44 +49,76 @@
 
 ---
 
+### 🔴 Bugs confirmados (pendientes de fix)
+
+| ID | Severidad | Descripción | Archivo | Fix |
+|----|-----------|-------------|---------|-----|
+| Bug-D | **MEDIO** | `invalidate_creator_context` no se llama después de `create_ticket` exitoso. El cache retiene el historial viejo para el resto de la sesión. **Parcialmente cubierto**: sí se llama en `_prepare_invocation` cuando detecta thread corruption (`core/agent.py:339`), pero el caso post-`create_ticket` sigue sin fix | `api/routes/chat.py`, `api/routes/stream.py` | Detectar respuesta exitosa del agente post-`create_ticket` e invalidar el cache. Alternativa simple: siempre invalidar en la route después de cada respuesta del creador |
+
+---
+
 ### ❌ Pendiente / No implementado
 
+#### Flujos incompletos
+- [ ] **Supervisor: aprobación de tickets** — `resolver.py:29` bloquea tickets con `approval_status: "pending"` pero no existe ninguna tool de aprobación en el supervisor ni en `ticket_tools.py`. Un ticket pendiente queda bloqueado sin salida. Requiere tool `approve_ticket` / `reject_ticket` + agregarla al tool set del supervisor
+- [ ] **Prefetch de contexto para resolutor** — el creador tiene `_fetch_creator_context` precargado en el system prompt; el resolutor empieza ciego y debe esperar que el agente llame `get_my_assigned_tickets` antes de ser útil. Implementar `_fetch_resolver_context(user_id, thread_id)` análogo al del creador
+
+#### Calidad del RAG
+- [x] **Deduplicación en `add_resolved_ticket`** — **CORREGIDO** (`rag/store.py:137-143`): antes de insertar, busca si existe un documento con el mismo `ticket_id` y lo elimina. Tickets reabiertos y re-resueltos reemplazan el embedding anterior.
+- [ ] **Feedback positivo retroalimenta el RAG** — cuando `record_agent_feedback` recibe rating 4–5 para `feedback_type="solution_suggested"`, debería aumentar el peso del documento correspondiente (re-insertar o boost). Los usuarios que resuelven su problema sin ticket son la mejor señal de calidad del RAG
+
+#### Seguridad — Prompt injection
+- [ ] **Capa 2 — Sanitización de input**: middleware en la route que detecta patrones de inyección antes de llegar al LLM (`api/middleware/` o `api/routes/chat.py`)
+- [ ] **Capa 3 — Inyección indirecta desde BD/RAG**: wrapping de resultados de tools con framing explícito de "datos externos, no ejecutar como instrucciones"
+- [ ] **Capa 4 — Aislamiento de user_id en tools**: el `user_id` no debe venir del LLM como parámetro — debe cerrarse desde el contexto autenticado del request. Actualmente el LLM podría pasar un `user_id` diferente al real (mayor impacto de seguridad)
+- [ ] **Capa 5 — Filtrado de output**: post-procesamiento para detectar/redactar datos sensibles antes de devolver al frontend
+
+#### Aislamiento de sesiones
+- [ ] **Thread isolation**: componer `safe_thread = f"{user_id}:{thread_id_del_cliente}"` en `chat.py` y `stream.py`. Actualmente si el frontend envía `thread_id="abc"`, cualquier usuario con ese mismo `thread_id` comparte el historial conversacional
+
 #### En el agente (sin tocar backend):
-- [ ] **Historial del usuario en contexto** — antes de sugerir solución, llamar `get_my_created_tickets` y avisar si hay ticket similar abierto en los últimos 7 días (`prompts/creator.py`)
-- [ ] **Resumen de conversación en el ticket** — la descripción del ticket debe incluir lo que el usuario dijo con sus palabras, no solo lo que el LLM infirió (`prompts/creator.py`)
-- [ ] **Detección de incidentes masivos** — tool `check_similar_open_tickets()` que alerte si >2 usuarios reportaron el mismo problema en 24h (`tools/ticket_tools.py`, `prompts/creator.py`, `prompts/supervisor.py`)
+- [ ] **Detección de incidentes masivos** — tool `check_similar_open_tickets()` que alerte si >2 usuarios reportaron el mismo problema en 24h (`tools/ticket_tools.py`, `prompts/supervisor.py`)
 - [ ] **Métricas de deflexión** — endpoint `GET /agent/metrics` con deflection_rate, avg_satisfaction, tickets_deflected (`api/routes/metrics.py`, `feedback/collector.py`)
-- [ ] **Escalación a humano** — detectar frustración del usuario y crear ticket urgente con nota interna (`prompts/base.py`, `prompts/creator.py`)
 - [ ] **Tool `add_note_to_ticket`** — agregar nota interna a un ticket existente (`tools/ticket_tools.py`)
 
 #### Requieren cambios en Express backend (desarrollo):
 - [ ] `GET /api/tickets/:id` — incluir historial de acciones
 - [ ] `POST /api/tickets/:id/notes` — agregar notas internas
-- [ ] CHECK de `accion` en `ticket_history` — ampliar para incluir `'nota'`
 
 #### Requieren acceso a Odoo API en producción:
-- [ ] **Knowledge base de Odoo** — integrar `helpdesk.knowledge` como segunda fuente de RAG (`ports/ticket_port.py`, `adapters/odoo_adapter.py`, `tools/rag_tools.py`)
+- [ ] **Knowledge base de Odoo** — integrar `helpdesk.knowledge` como segunda fuente de RAG
 - [ ] Verificar paginación (`limit`/`offset`) en `get_all_tickets` contra Odoo real
-- [ ] Verificar mapping del Chatter de Odoo (`log_ids`/`x_private_note_ids`) a historial del agente
-- [ ] `http_adapter.py` — sigue siendo stub; solo `odoo_adapter.py` está implementado
+- [ ] Verificar mapping del Chatter de Odoo a historial del agente
+- [ ] `http_adapter.py` — sigue siendo stub
 
 #### Requieren servicios externos (Fase 3):
 - [ ] **Alertas proactivas de SLA** — background task + email/Slack/webhook
 - [ ] **Multi-canal** — WhatsApp Business API / Teams / Slack
-- [ ] **Soporte de adjuntos/imágenes** — upload endpoint + Llama 4 Scout multimodal (ya instalado)
+- [ ] **Soporte de adjuntos/imágenes** — upload endpoint + Llama 4 Scout multimodal
 
 ---
 
-### Bugs corregidos en esta sesión (2026-04-14)
+### Bugs corregidos
 
 | Bug | Archivo | Fix aplicado |
 |---|---|---|
-| Campos `fields.Html` rechazados por Odoo sin HTML | `odoo_adapter.py` | `_text_to_html()` wrappea texto plano en `<p>` |
-| `system_equipment` concatenado a `descripcion` | `odoo_adapter.py` | Se envía como campo standalone |
-| `reopen_ticket` borraba historial previo | `odoo_adapter.py` | Lee y preserva `motivo_resolucion` anterior |
-| `_trim_hook` tenía `import logging` y `_log` duplicados dentro de la función | `core/agent.py` | Eliminados — ya existen a nivel módulo |
+| **Bug-C** — HTML crudo en embeddings de ChromaDB (`motivo_resolucion`, `causa_raiz` con `<p>`, `<br/>`, `&amp;`) | `rag/store.py:119-124` | `_strip_html()` limpia tags HTML antes de construir `document_text` |
+| **Bug-E** — `rag_similarity_threshold` definido en settings pero ignorado en `search_similar` | `rag/store.py:82-90` | Filtro `if score < threshold: continue` antes de construir cada `SolutionItem` |
+| `ValueError: invalid literal for int()` — LLM pasaba nombre en lugar de ID | `tools/ticket_tools.py` | `_resolve_id()` resuelve nombre → ID desde catálogo |
+| `handle_tool_errors` en lugar incorrecto | `core/agent.py` | Movido a `ToolNode(tools, handle_tool_errors=True)` |
+| Thread corrupto por crash mid-tool-call | `core/agent.py` | `aget_state()` detecta orphaned tool_calls y resetea thread |
+| Historial skipped por el LLM (tool call ignorada) | `core/agent.py` | Historial inyectado directamente en system prompt via `_fetch_creator_context` |
+| Fallbacks de peor calidad generaban respuestas basura | `config/settings.py` | Removidos `qwen3-coder:free` y `nemotron-nano:free` |
+| Campos `fields.Html` rechazados por Odoo | `adapters/odoo_adapter.py` | `_text_to_html()` wrappea texto plano en `<p>` |
+| `_trim_hook` con imports duplicados | `core/agent.py` | Eliminados — ya existen a nivel módulo |
 | Sesión permanente acumulaba contexto indefinidamente | `chat.py`, `stream.py` | `thread_id = user-{id}-{date.today()}` |
-| `prompts/resolver.py` no verificaba `approval_status` | `prompts/resolver.py` | Bloquea resolución si estado es pending o rejected |
+| SystemMessages acumulados en el checkpoint (N msgs × N llamadas) | `core/agent.py:_trim_hook` | Solo se conserva el `all_system[-1]` — el más reciente |
+| `_fetch_creator_context` llamado en cada mensaje (N round-trips a Odoo) | `core/agent.py` | Cache por `thread_id` con FIFO de 500 entradas |
+| Lógica duplicada entre `get_response` y `stream_response` | `core/agent.py` | Extraída a `_prepare_invocation()` |
+| `causa_raiz` descartada al indexar en RAG | `rag/store.py`, `tools/ticket_tools.py`, `adapters/odoo_adapter.py`, `ports/rag_port.py`, `tools/rag_tools.py` | `causa_raiz` se embebe en `document_text`, se guarda en metadata y se expone al LLM via `suggest_solution_before_ticket` |
+| `f"TCK-{ticket_id:04d}"` con `ticket_id: str` → `ValueError` en fallback de `resolve_ticket` | `tools/ticket_tools.py` | Cambiado a `ticket.get("name") or f"TCK-{int(ticket_id):04d}"` (cortocircuito evita evaluación eager) |
+| **Bug-A** — `_fetch_creator_context` filtraba por `t.get("state","")` (campo inexistente en Odoo). Todos los tickets aparecían "abiertos" incluyendo cerrados/resueltos | `core/agent.py` | Nuevo `_is_open(ticket)` que inspecciona `stage_id[1].lower()` contra set de nombres cerrados. `stage_id=False` se trata como abierto |
+| **Bug-B** — `get_tickets_by_creator` devolvía tickets cerrados (sin filtro de stage), inconsistente con `get_tickets_by_assignee` | `adapters/odoo_adapter.py` | Agregado `["stage_id.is_close","=",False]` al domain. El stage name ahora aparece correctamente en el historial |
 
 ---
 

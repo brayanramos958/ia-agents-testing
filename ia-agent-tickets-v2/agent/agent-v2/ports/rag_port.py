@@ -20,6 +20,7 @@ class SolutionItem:
     description: str
     motivo_resolucion: str  # Resolution text (Odoo field name)
     score: float            # Similarity score 0.0–1.0 (higher = more similar)
+    causa_raiz: str = ""    # Root cause (Odoo field: causa_raiz) — empty if not recorded
 
 
 @dataclass
@@ -53,11 +54,15 @@ class IRAGPort(ABC):
     @abstractmethod
     def add_resolved_ticket(self, ticket_id: int, ticket_name: str,
                             ticket_type: str, category: str,
-                            description: str, motivo_resolucion: str) -> bool:
+                            description: str, motivo_resolucion: str,
+                            causa_raiz: str = "") -> bool:
         """
         Add a newly resolved ticket to the knowledge base.
         Called immediately after a ticket is resolved so the knowledge base
         grows in real time.
+
+        causa_raiz (Odoo field) is included in the embedded document so that
+        semantic search can match on root cause patterns, not just resolution text.
 
         Returns True if added successfully.
         """

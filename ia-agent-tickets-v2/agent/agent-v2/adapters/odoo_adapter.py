@@ -259,12 +259,19 @@ class OdooAdapter(ITicketPort):
         }
 
     def get_tickets_by_creator(self, user_id: int) -> list:
-        """Returns tickets created by or for the given user."""
+        """
+        Returns open tickets created by or for the given user.
+
+        Filters out closed/resolved stages (stage_id.is_close=False) so that
+        _fetch_creator_context only injects active tickets into the system prompt.
+        Consistent with get_tickets_by_assignee which has the same filter.
+        """
         return self._call_kw(
             "helpdesk.ticket.base", "search_read",
-            [[["|",
-               ["creado_por", "=", user_id],
-               ["usuario_solicitante_id", "=", user_id]]]],
+            [[["stage_id.is_close", "=", False],
+              "|",
+              ["creado_por", "=", user_id],
+              ["usuario_solicitante_id", "=", user_id]]],
             {"fields": [
                 "name", "asunto", "stage_id", "urgency_id",
                 "ticket_type_id", "fecha_creacion", "partner_id",
@@ -483,7 +490,7 @@ class OdooAdapter(ITicketPort):
                ["stage_id.is_close",   "=", True]]]],
             {"fields": [
                 "id", "name", "ticket_type_id", "category_id",
-                "descripcion", "motivo_resolucion",
+                "descripcion", "motivo_resolucion", "causa_raiz",
             ], "limit": 500},
         )
 
@@ -499,5 +506,6 @@ class OdooAdapter(ITicketPort):
                 "category":          t["category_id"][1]    if isinstance(t.get("category_id"), list)    else "",
                 "description":       t.get("descripcion", ""),
                 "motivo_resolucion": t.get("motivo_resolucion", ""),
+                "causa_raiz":        t.get("causa_raiz", ""),
             })
         return result

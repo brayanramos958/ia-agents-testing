@@ -160,16 +160,18 @@ def resolve_ticket(
     """
     result = _port.resolve_ticket(int(ticket_id), motivo_resolucion, causa_raiz, int(user_id))
 
-    # Update the knowledge base in real time so future tickets benefit immediately
+    # Update the knowledge base in real time so future tickets benefit immediately.
+    # causa_raiz is passed so root-cause patterns are also searchable via RAG.
     if result.get("success") and _rag_port:
         ticket = _port.get_ticket_detail(int(ticket_id), int(user_id), "resueltor")
         _rag_port.add_resolved_ticket(
             ticket_id=int(ticket_id),
-            ticket_name=ticket.get("name", f"TCK-{ticket_id:04d}"),
+            ticket_name=ticket.get("name") or f"TCK-{int(ticket_id):04d}",
             ticket_type=ticket.get("ticket_type", ""),
             category=ticket.get("category", ""),
             description=ticket.get("descripcion", ""),
             motivo_resolucion=motivo_resolucion,
+            causa_raiz=causa_raiz,
         )
 
     return result

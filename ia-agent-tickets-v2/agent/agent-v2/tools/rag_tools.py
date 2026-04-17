@@ -79,6 +79,7 @@ def suggest_solution_before_ticket(description: str, category: str = "") -> dict
                 "category": s.category,
                 "description": s.description,
                 "motivo_resolucion": s.motivo_resolucion,
+                "causa_raiz": s.causa_raiz,
                 "score": s.score,
             }
             for s in result.solutions
