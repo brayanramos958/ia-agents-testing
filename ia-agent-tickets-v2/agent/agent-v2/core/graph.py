@@ -2,8 +2,13 @@
 LLM and checkpointer factory functions.
 
 build_llm()          → Groq primary + OpenRouter fallback on rate limit
-init_checkpointer()  → async init: opens aiosqlite connection, stores instance
+init_checkpointer()  → async init: opens DB connection, stores instance
 build_checkpointer() → returns the initialized instance (or MemorySaver as fallback)
+
+Supported checkpoint backends:
+  sqlite   → AsyncSqliteSaver   (dev / single-worker)
+  postgres → AsyncPostgresSaver (production / multi-user concurrency)
+  memory   → MemorySaver        (dev / no persistence)
 """
 
 from langchain_groq import ChatGroq
@@ -59,13 +64,15 @@ def build_llm():
 
 async def init_checkpointer() -> None:
     """
-    Opens the SQLite connection asynchronously and stores a ready-to-use
-    AsyncSqliteSaver instance in _checkpointer_instance.
+    Initializes the checkpointer backend and stores a ready-to-use instance.
 
     Must be called once during FastAPI lifespan startup before any request
     arrives. The connection stays open for the lifetime of the process.
 
-    Falls back to MemorySaver if checkpoint_backend != "sqlite".
+    Backends:
+      sqlite   → AsyncSqliteSaver via aiosqlite (dev / single-worker)
+      postgres → AsyncPostgresSaver via psycopg pool (production)
+      *        → MemorySaver (in-memory, lost on restart)
     """
     global _checkpointer_instance
 
@@ -75,10 +82,32 @@ async def init_checkpointer() -> None:
 
         conn = await aiosqlite.connect(settings.checkpoint_db_path)
         checkpointer = AsyncSqliteSaver(conn)
-        # AsyncSqliteSaver requires its tables to exist before first use.
         await checkpointer.setup()
         _checkpointer_instance = checkpointer
         print(f"[checkpointer] AsyncSqliteSaver ready — {settings.checkpoint_db_path}")
+
+    elif settings.checkpoint_backend == "postgres":
+        if not settings.postgres_dsn:
+            raise RuntimeError(
+                "CHECKPOINT_BACKEND=postgres requires POSTGRES_DSN to be set in .env.\n"
+                "Format: postgresql://user:password@host:5432/dbname"
+            )
+        from psycopg_pool import AsyncConnectionPool
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+        # psycopg3 requires the postgresql+psycopg scheme for async pool.
+        # Replace standard postgresql:// prefix if user omitted the driver suffix.
+        dsn = settings.postgres_dsn
+        if dsn.startswith("postgresql://") and "+psycopg" not in dsn:
+            dsn = dsn.replace("postgresql://", "postgresql+psycopg://", 1)
+
+        pool = AsyncConnectionPool(conninfo=dsn, max_size=20, open=False)
+        await pool.open()
+        checkpointer = AsyncPostgresSaver(pool)
+        await checkpointer.setup()
+        _checkpointer_instance = checkpointer
+        print(f"[checkpointer] AsyncPostgresSaver ready — {settings.postgres_dsn.split('@')[-1]}")
+
     else:
         from langgraph.checkpoint.memory import MemorySaver
         _checkpointer_instance = MemorySaver()
