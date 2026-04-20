@@ -57,6 +57,29 @@
 
 ---
 
+### 🚀 Producción — mejoras para 50 usuarios simultáneos
+
+#### Crítico (rompe bajo carga)
+
+- [x] **[PROD-1] Migrar checkpointer a PostgreSQL** — `AsyncSqliteSaver` tiene write contention con múltiples usuarios concurrentes. Fix: `AsyncPostgresSaver` de `langgraph-checkpoint-postgres`. Requiere `CHECKPOINT_BACKEND=postgres` + `POSTGRES_DSN` en `.env`. `settings.py`, `core/graph.py`, `pyproject.toml`
+- [ ] **[PROD-2] ChromaDB en modo servidor** — con múltiples uvicorn workers, cada proceso apunta al mismo archivo SQLite y colisionan. Fix: `chroma run` como servicio independiente + `chromadb.HttpClient` en `rag/store.py`. Alternativa a largo plazo: pgvector
+- [ ] **[PROD-3] Semáforo async en LLM calls** — 50 usuarios pueden generar 50+ LLM calls paralelas, saturando Groq y el fallback OpenRouter. Fix: `asyncio.Semaphore(20)` antes de `agent.ainvoke()` en `core/agent.py`
+- [ ] **[PROD-4] Thread isolation** — `thread_id` viene del frontend sin prefijo de `user_id`. Dos usuarios con el mismo `thread_id` comparten historial. Fix (1 línea): `safe_thread = f"{user_id}:{thread_id}"` en `api/routes/chat.py` y `api/routes/stream.py`
+
+#### Medio (degrada bajo carga)
+
+- [ ] **[PROD-5] OdooAdapter async** — `httpx.post` síncrono corre en thread pool (default 40 threads). Bajo carga con Odoo lento, el pool se agota. Fix: migrar a `httpx.AsyncClient` con `await` en `adapters/odoo_adapter.py`
+- [ ] **[PROD-6] Rate limiting por usuario** — un usuario puede saturar el presupuesto LLM del equipo entero. Fix: `slowapi` con `@limiter.limit("10/minute")` en las routes de chat y stream
+- [ ] **[PROD-7] `_creator_context_cache` no sobrevive múltiples workers** — cada worker tiene su propio dict en memoria. Fix: Redis para cache compartido, o documentar restricción de single-worker
+
+#### Observabilidad (operar sin ceguera)
+
+- [ ] **[PROD-8] Health check real** — el `/health` actual siempre devuelve 200. Debe verificar conectividad a Odoo, ChromaDB y LLM. Fix: checks async con timeout corto en `main.py`
+- [ ] **[PROD-9] Structured logging con contexto** — logs actuales no incluyen `user_id` ni `thread_id`. Imposible trazar una sesión fallida en producción. Fix: logger con contextvars en cada request
+- [ ] **[PROD-10] Métricas de deflexión** — endpoint `GET /agent/metrics` con `deflection_rate`, `avg_satisfaction`, `tickets_deflected`. Files: `api/routes/metrics.py`, `feedback/collector.py`
+
+---
+
 ### ❌ Pendiente / No implementado
 
 #### Flujos incompletos

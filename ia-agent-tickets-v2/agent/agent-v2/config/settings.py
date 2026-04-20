@@ -55,10 +55,14 @@ class Settings(BaseSettings):
     agent_api_key: str = "dev-key-change-in-prod"
 
     # ── Conversation persistence ─────────────────────────────────────────────
-    # "memory" → InMemorySaver (lost on restart, ok for dev)
-    # "sqlite" → SqliteSaver (persists across restarts, recommended)
+    # "memory"   → InMemorySaver (lost on restart, dev only)
+    # "sqlite"   → AsyncSqliteSaver (persists across restarts, single-worker dev)
+    # "postgres" → AsyncPostgresSaver (production — required for multi-user concurrency)
     checkpoint_backend: str = "sqlite"
     checkpoint_db_path: str = "./checkpoints.db"
+    # PostgreSQL DSN — required when checkpoint_backend=postgres
+    # Format: postgresql://user:password@host:5432/dbname
+    postgres_dsn: str = ""
 
     # ── AI feedback (separate from ticket CSAT) ──────────────────────────────
     # Stores ratings of the AI assistant's helpfulness — NOT ticket satisfaction.
