@@ -85,13 +85,13 @@ def set_rag_port_for_tickets(rag_port: IRAGPort) -> None:
 @backend_retry
 def create_ticket(
     asunto: str,
-    descripcion: str,
     ticket_type_id: Union[int, str],
     category_id: Union[int, str],
     urgency_id: Union[int, str],
     impact_id: Union[int, str],
     priority_id: Union[int, str],
     user_id: Union[int, str],
+    descripcion: str = "",
     subcategory_id: Optional[Union[int, str]] = None,
     element_id: Optional[Union[int, str]] = None,
     system_equipment: str = "",

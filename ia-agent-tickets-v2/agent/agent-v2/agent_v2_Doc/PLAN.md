@@ -2,13 +2,14 @@
 
 ---
 
-## Estado actual — 2026-04-24 (última revisión)
+## Estado actual — 2026-04-27 (última revisión)
 
 > **Tests**: `scratch/test_improvements.py` (30 tests) + `scratch/test_bugs_ab.py` (9 tests) — todos verdes.
 > `scratch/test_fullflow.py` (14 turnos / 3 roles) — **14/14 PASS** confirmado 2026-04-22 y 2026-04-23 con Groq llama-4-scout-17b.
-> `scratch/test_rol.py` — test modular por rol. Supervisor: **4/4 PASS** confirmado 2026-04-24.
+> `scratch/test_rol.py` — **2026-04-27**: Creador 4/5 (1 warn semántico en test), Resueltor **5/5 PASS**, Supervisor **4/4 PASS** — con PostgreSQL como checkpointer.
 > RAG operativo: 3 tickets sembrados (TCK-0001, TCK-0002, TCK-0016). Scores correctos post-fix: 0.688–0.815.
 > Flujo aprobación supervisor: **PASS** — approve y reject verificados en BD (2026-04-24).
+> **Checkpointer migrado a PostgreSQL 18** (2026-04-27) — 3 bugs Windows corregidos. Arranque: `uv run python run.py`.
 
 ### ✅ Implementado y funcionando (probado en desarrollo)
 
@@ -32,13 +33,14 @@
 | `prompts/resolver.py` | ✅ | Tickets agrupados por SLA. Verifica `approval_status`. Guía `motivo_resolucion` + `causa_raiz`. **2026-04-21**: removido `get_categories` del listado de tools del prompt (no está en el toolset del rol) |
 | `prompts/supervisor.py` | ✅ | Resumen ejecutivo al iniciar. Priorización visual por SLA. **2026-04-21**: removido `get_categories` (no disponible para este rol), agregado `get_stages` (sí disponible). **2026-04-24**: agregado flujo completo de aprobación/rechazo con confirmación, conteo de pendientes en resumen inicial |
 | `feedback/collector.py` | ✅ | SQLite-backed, evaluación del agente AI (≠ CSAT del ticket) |
-| `core/graph.py` | ✅ | Groq primario + OpenRouter fallback + AsyncSqliteSaver. **2026-04-21**: `timeout=60` en cada modelo fallback (previene esperas >3000s). `APIStatusError` agregado a `exceptions_to_handle` (captura error 402 spend-limit de OpenRouter). Ollama: `think=False` + `num_ctx=8192` para evitar OOM en CPU |
+| `core/graph.py` | ✅ | Groq primario + OpenRouter fallback + **AsyncPostgresSaver (2026-04-27)**. `timeout=60` en cada modelo fallback. `APIStatusError` en `exceptions_to_handle`. Ollama: `think=False` + `num_ctx=8192`. **Bug-W2**: DSN ya NO se transforma a `postgresql+psycopg://` (formato SQLAlchemy incompatible con psycopg3). **Bug-W3**: setup() usa conexión dedicada con `autocommit=True` para `CREATE INDEX CONCURRENTLY` |
 | `core/agent.py` | ✅ | `_trim_hook` (ventana 12 msgs, saneado de huérfanos, **solo conserva último SystemMessage**). `_fetch_creator_context` inyecta historial en system prompt (**cacheado por thread_id**). `_prepare_invocation` elimina lógica duplicada entre `/chat` y `/stream`. Detección de thread corrupto con `aget_state()`. `invalidate_creator_context()` para limpiar cache explícitamente |
 | `api/routes/chat.py` | ✅ | sesión diaria: `thread_id = user-{id}-{date.today()}` |
 | `api/routes/stream.py` | ✅ | POST /agent/stream — SSE token a token via `astream_events` |
 | `api/routes/invoke.py` | ✅ | POST /agent/invoke — A2A stateless sin LLM |
 | `api/middleware/auth.py` | ✅ | X-Agent-Key |
 | `main.py` | ✅ | lifespan con RAG seeding resiliente |
+| `run.py` | ✅ | **NUEVO 2026-04-27** — entry point Windows. Crea `asyncio.SelectorEventLoop()` explícitamente antes de que uvicorn inicie, evitando incompatibilidad psycopg3 + ProactorEventLoop (Bug-W1). En Linux/Mac el `else` usa `asyncio.run()` estándar. Uso: `uv run python run.py` |
 | `pyproject.toml` + `uv.lock` | ✅ | gestionado con uv |
 
 ---
@@ -48,18 +50,19 @@
 | Archivo | Estado | Qué falta verificar |
 |---|---|---|
 | `adapters/odoo_adapter.py` | ⚠️ implementado, no probado en prod | JSON-RPC 2.0 contra Odoo 15. 8 fixes de producción aplicados: re-auth automático en sesión expirada, `_text_to_html` con escape HTML completo, retry en `_call_kw`. Necesita credenciales reales para validar |
-| `_text_to_html()` en odoo_adapter | ⚠️ implementado, no probado | Odoo requiere HTML en campos `fields.Html`; no se ha verificado en Odoo real |
+| `_text_to_html()` en odoo_adapter | ⚠️ implementado, no probado | Odoo requiere HTML en `descripcion`, `causa_raiz`, `motivo_resolucion` (tipo `fields.Html`); verificar que se aplica en los 3 campos |
 | `usuario_solicitante_id` en `create_ticket` | ⚠️ implementado, no probado | Se envía explícitamente; en Odoo lo setea `@api.onchange`, no JSON-RPC |
-| `system_equipment` como campo real | ⚠️ implementado, no probado | Es `Char(tracking=True)` en custom, se envía como campo standalone |
+| `system_equipment` como campo real | ⚠️ implementado, no probado | Es `Char(tracking=True)` en `ITS_Helpdesk_custom` — confirmado que existe en el módulo real |
 | `reopen_ticket` con historial | ⚠️ implementado, no probado | Lee `motivo_resolucion` actual y lo preserva con `<hr/>` separator |
-| `approval_status` en `get_ticket_detail` | ⚠️ implementado, no probado | Agregado a fields list; depende de que Odoo lo retorne |
-| Campos SLA (`sla_status`, `deadline_date`, `is_about_to_expire`) | ⚠️ implementado, no probado | Stored=True en Odoo; verificar que JSON-RPC los devuelva |
+| `approval_status` en `get_ticket_detail` | ⚠️ implementado, no probado | Campo `Selection('pending','approved','rejected')` confirmado en `ITS_Helpdesk_custom`. Sí lo retorna Odoo. |
+| Campos SLA (`sla_status`, `deadline_date`, `is_about_to_expire`) | ⚠️ implementado, no probado | `stored=True` en Odoo — confirmado en modelo. Verificar que JSON-RPC los devuelva en `search_read` |
+| `approve_ticket` y `reject_ticket` en `OdooAdapter` | ❌ **NO IMPLEMENTADO** | Existen en `express_adapter.py` y en el port abstracto, pero **faltan en `odoo_adapter.py`**. Bloqueante para producción. Ver sección de compatibilidad Odoo. |
 
 ---
 
 ### 🔴 Bugs confirmados (pendientes de fix)
 
-> Sin bugs críticos pendientes al 2026-04-23. Los pendientes abiertos son mejoras y flujos incompletos (ver sección ❌ más abajo).
+> Sin bugs críticos pendientes al 2026-04-27. Los pendientes abiertos son mejoras y flujos incompletos (ver sección ❌ más abajo).
 
 ---
 
@@ -67,7 +70,7 @@
 
 #### Crítico (rompe bajo carga)
 
-- [x] **[PROD-1] Migrar checkpointer a PostgreSQL** — `AsyncSqliteSaver` tiene write contention con múltiples usuarios concurrentes. Fix: `AsyncPostgresSaver` de `langgraph-checkpoint-postgres`. Requiere `CHECKPOINT_BACKEND=postgres` + `POSTGRES_DSN` en `.env`. `settings.py`, `core/graph.py`, `pyproject.toml`
+- [x] **[PROD-1] Migrar checkpointer a PostgreSQL** — **COMPLETO 2026-04-27**. `AsyncPostgresSaver` activo en PostgreSQL 18 local. DB: `helpdesk_checkpoints`, user: `helpdesk_agent`. 3 bugs Windows corregidos (ver Bug-W1/W2/W3). Tablas LangGraph creadas: `checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`. Verificado con test_rol.py: Creador 4/5, Resueltor 5/5, Supervisor 4/4.
 - [ ] **[PROD-2] ChromaDB en modo servidor** — con múltiples uvicorn workers, cada proceso apunta al mismo archivo SQLite y colisionan. Fix: `chroma run` como servicio independiente + `chromadb.HttpClient` en `rag/store.py`. Alternativa a largo plazo: pgvector
 - [ ] **[PROD-3] Semáforo async en LLM calls** — 50 usuarios pueden generar 50+ LLM calls paralelas, saturando Groq y el fallback OpenRouter. Fix: `asyncio.Semaphore(20)` antes de `agent.ainvoke()` en `core/agent.py`
 - [ ] **[PROD-4] Thread isolation** — `thread_id` viene del frontend sin prefijo de `user_id`. Dos usuarios con el mismo `thread_id` comparten historial. Fix (1 línea): `safe_thread = f"{user_id}:{thread_id}"` en `api/routes/chat.py` y `api/routes/stream.py`
@@ -115,10 +118,19 @@
 - [ ] `GET /api/tickets/:id` — incluir historial de acciones
 - [ ] `POST /api/tickets/:id/notes` — agregar notas internas
 
-#### Requieren acceso a Odoo API en producción:
+#### Compatibilidad con módulo Odoo real (ITS_Helpdesk — análisis 2026-04-27)
+
+> Módulo analizado: `ITS_Helpdesk_base` (v15.0.1.0.0) + `ITS_Helpdesk_custom` (v15.0.1.0.1).
+> Modelo principal: `helpdesk.ticket.base`. Sin controlador REST — solo JSON-RPC ORM.
+> **17 de 18 campos que usa el agente coinciden exactamente con el módulo real.**
+
+- [ ] **`rejection_reason` no existe en Odoo** — el módulo no define ese campo. El motivo de rechazo en Odoo vive en `approval_comment` (Text, readonly) del ticket o en `helpdesk.ticket.approval.comment`. El `OdooAdapter.reject_ticket()` debe escribir en `approval_comment` en lugar de `rejection_reason`. El campo `rejection_reason` solo existe en el backend Express/SQLite de desarrollo.
+- [ ] **`approve_ticket` y `reject_ticket` faltan en `OdooAdapter`** — el port abstracto los declara como `@abstractmethod`, `express_adapter.py` los implementa, pero `odoo_adapter.py` no. `approve_ticket` debe setear `approval_status='approved'` + `approval_date=now`. `reject_ticket` debe setear `approval_status='rejected'` + `approval_comment=reason`.
+- [ ] **Stage `is_resolve=True` no configurado en datos base** — el campo existe en `helpdesk.ticket.stage` pero ningún stage en el XML de datos tiene `is_resolve=True` explícito. El stage "Resuelto" (seq=110) existe pero el flag no está activo. En producción, `_get_resolve_stage_id()` en `OdooAdapter` fallará hasta que se configure manualmente desde la UI de Odoo o se parchee el XML de datos. Acción: configurar el stage "Resuelto" con `is_resolve=True` en la instancia de Odoo antes de conectar el agente.
+- [ ] **`_text_to_html()` debe cubrir `causa_raiz` y `motivo_resolucion`** — estos 3 campos son `fields.Html` en Odoo: `descripcion`, `causa_raiz`, `motivo_resolucion`. Verificar que el `OdooAdapter` aplica `_text_to_html()` en los 3 al escribir, no solo en `descripcion`.
 - [ ] **Knowledge base de Odoo** — integrar `helpdesk.knowledge` como segunda fuente de RAG
 - [ ] Verificar paginación (`limit`/`offset`) en `get_all_tickets` contra Odoo real
-- [ ] Verificar mapping del Chatter de Odoo a historial del agente
+- [ ] Verificar mapping del Chatter de Odoo (`log_ids`, `x_private_note_ids`) a historial del agente
 - [ ] `http_adapter.py` — sigue siendo stub
 
 #### Requieren servicios externos (Fase 3):
@@ -165,6 +177,10 @@
 | **Bug-RAG-1** (2026-04-23) — `vector_store/` tenía 5 docs de BD antigua (iteración anterior). `initialize_from_resolved_tickets` tiene guard `count() > 0 → skip` → nunca re-siembra | `vector_store/` | Borrar el directorio para forzar re-seed. Agregado a `.gitignore` |
 | **Bug-RAG-2** (2026-04-23) — `similarity_search_with_relevance_scores` retornaba distancias coseno sin normalizar (rango [-1, 1]). Scores negativos nunca superaban el umbral 0.6 → RAG siempre "SIN SOLUCIONES" | `rag/store.py` | Cambio a `similarity_search_with_score` + conversión `sim = 1 - (dist / 2)` → scores en [0, 1] |
 | **Bug-RAG-3** (2026-04-23) — `resolve_ticket` llamaba `add_resolved_ticket` con `ticket.get("ticket_type")` y `ticket.get("category")` — vacíos porque Express usa `tipo_requerimiento` y `categoria` | `tools/ticket_tools.py` | Fallback: `ticket.get("ticket_type") or ticket.get("tipo_requerimiento", "")` |
+| **Bug-W1** (2026-04-27) — `psycopg3 AsyncConnectionPool` incompatible con `ProactorEventLoop` (Windows default). `asyncio.set_event_loop_policy()` en `main.py` llega tarde porque uvicorn crea el loop antes de importar `main.py` | `run.py` (nuevo) | Entry point que crea `asyncio.SelectorEventLoop()` explícitamente y llama `loop.run_until_complete(server.serve())` — bypasea la creación automática de uvicorn |
+| **Bug-W2** (2026-04-27) — `graph.py` convertía `postgresql://` → `postgresql+psycopg://` con comentario incorrecto "psycopg3 requires this". `AsyncConnectionPool` rechaza ese formato (es SQLAlchemy, no psycopg3) | `core/graph.py` | Eliminada la transformación de DSN — usar `settings.postgres_dsn` directamente sin modificar |
+| **Bug-W3** (2026-04-27) — `checkpointer.setup()` ejecuta `CREATE INDEX CONCURRENTLY` que falla con `ActiveSqlTransaction` porque el pool por defecto usa autocommit=False | `core/graph.py` | Conexión dedicada `psycopg.AsyncConnection.connect(..., autocommit=True)` solo para `setup()`. Pool normal para requests. |
+| **Bug-S1** (2026-04-27) — `create_ticket` con `descripcion: str` (required) fallaba con HTTP 500 cuando modelos de fallback OpenRouter omitían el campo. Groq valida el schema server-side antes de llegar a Python | `tools/ticket_tools.py` | `descripcion: str = ""` — opcional en schema, el docstring documenta que es requerida conceptualmente |
 
 ---
 

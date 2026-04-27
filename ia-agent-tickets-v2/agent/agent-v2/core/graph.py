@@ -127,20 +127,22 @@ async def init_checkpointer() -> None:
                 "CHECKPOINT_BACKEND=postgres requires POSTGRES_DSN to be set in .env.\n"
                 "Format: postgresql://user:password@host:5432/dbname"
             )
+        import psycopg
         from psycopg_pool import AsyncConnectionPool
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-        # psycopg3 requires the postgresql+psycopg scheme for async pool.
-        # Replace standard postgresql:// prefix if user omitted the driver suffix.
-        dsn = settings.postgres_dsn
-        if dsn.startswith("postgresql://") and "+psycopg" not in dsn:
-            dsn = dsn.replace("postgresql://", "postgresql+psycopg://", 1)
+        # setup() runs CREATE INDEX CONCURRENTLY which requires autocommit=True.
+        # Use a dedicated autocommit connection only for migrations, then close it.
+        async with await psycopg.AsyncConnection.connect(
+            settings.postgres_dsn, autocommit=True
+        ) as setup_conn:
+            await AsyncPostgresSaver(setup_conn).setup()
 
-        pool = AsyncConnectionPool(conninfo=dsn, max_size=20, open=False)
+        # Pool for actual request handling — standard transaction mode.
+        # psycopg3 accepts standard postgresql:// URIs (not postgresql+psycopg://).
+        pool = AsyncConnectionPool(conninfo=settings.postgres_dsn, max_size=20, open=False)
         await pool.open()
-        checkpointer = AsyncPostgresSaver(pool)
-        await checkpointer.setup()
-        _checkpointer_instance = checkpointer
+        _checkpointer_instance = AsyncPostgresSaver(pool)
         print(f"[checkpointer] AsyncPostgresSaver ready — {settings.postgres_dsn.split('@')[-1]}")
 
     else:
