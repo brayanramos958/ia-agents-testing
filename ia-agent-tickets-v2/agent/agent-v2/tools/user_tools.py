@@ -9,7 +9,8 @@ Injected port is the same ITicketPort used by ticket_tools.
 
 from langchain_core.tools import tool
 from ports.ticket_port import ITicketPort
-from typing import Optional
+from typing import Optional, Union
+from pydantic import BaseModel, field_validator
 
 _port: ITicketPort = None
 
@@ -50,7 +51,25 @@ def get_ticket_types() -> list:
     return _port.get_ticket_types()
 
 
-@tool
+class _CategoriesInput(BaseModel):
+    parent_id: Optional[Union[int, str]] = None
+
+    @field_validator("parent_id", mode="before")
+    @classmethod
+    def _normalize(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, str) and v.lower() in ("null", "none", ""):
+            return None
+        if isinstance(v, str):
+            try:
+                return int(v)
+            except ValueError:
+                return None
+        return v
+
+
+@tool(args_schema=_CategoriesInput)
 def get_categories(parent_id: Optional[int] = None) -> list:
     """
     Returns categories from the 3-level hierarchy.
@@ -63,6 +82,7 @@ def get_categories(parent_id: Optional[int] = None) -> list:
     Always call without parent_id first, then drill down based on user selection.
     Each item contains: id, name, full_name, level.
     Use the id from the deepest available level when calling create_ticket.
+    Pass null (not the string "null") to get top-level categories.
     """
     return _port.get_categories(parent_id)
 

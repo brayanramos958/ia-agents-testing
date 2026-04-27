@@ -20,6 +20,7 @@ def list_tickets(
     created_by: Optional[str] = None,
     asignado_a: Optional[str] = None,
     estado: Optional[str] = None,
+    approval_status: Optional[str] = None,
     db: Session = Depends(database.get_db),
 ):
     return crud.get_tickets(
@@ -29,6 +30,7 @@ def list_tickets(
         created_by=created_by,
         asignado_a=asignado_a,
         estado=estado,
+        approval_status=approval_status,
     )
 
 

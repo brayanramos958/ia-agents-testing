@@ -70,9 +70,10 @@ class ChromaRAGStore(IRAGPort):
             full_query = f"Category: {category}. {full_query}"
 
         try:
-            results = self._store.similarity_search_with_relevance_scores(
-                full_query, k=k
-            )
+            # similarity_search_with_score returns cosine distances (0=identical, 2=opposite).
+            # Convert to similarity: sim = 1 - (distance / 2), range [0, 1].
+            raw_results = self._store.similarity_search_with_score(full_query, k=k)
+            results = [(doc, 1.0 - (dist / 2.0)) for doc, dist in raw_results]
         except Exception:
             return SuggestionResult(solutions_found=False)
 

@@ -80,6 +80,22 @@ class ITicketPort(ABC):
     def reopen_ticket(self, ticket_id: int, reason: str, user_id: int) -> dict:
         """Reopen a resolved or closed ticket."""
 
+    @abstractmethod
+    def approve_ticket(self, ticket_id: int, user_id: int) -> dict:
+        """
+        Approve a pending ticket so the resolver can proceed.
+        Sets approval_status to "approved".
+        Returns: {"success": bool}
+        """
+
+    @abstractmethod
+    def reject_ticket(self, ticket_id: int, reason: str, user_id: int) -> dict:
+        """
+        Reject a pending ticket.
+        Sets approval_status to "rejected" and stores the rejection reason.
+        Returns: {"success": bool}
+        """
+
     # SECURITY: delete_ticket is defined in the interface but intentionally
     # excluded from all role tool lists until an authorization layer is in place.
     # To enable: add delete_ticket to get_supervisor_tools() in tools/ticket_tools.py

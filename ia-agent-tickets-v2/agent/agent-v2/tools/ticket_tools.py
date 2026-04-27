@@ -8,6 +8,8 @@ Delete is implemented here but EXCLUDED from all tool lists.
 """
 
 import json
+from typing import Optional, Union
+
 from langchain_core.tools import tool
 from tenacity import retry, stop_after_attempt, wait_exponential
 from ports.ticket_port import ITicketPort
@@ -54,6 +56,18 @@ def _resolve_id(value: str, field: str, catalog_fn) -> int:
         )
 
 
+def _slim_ticket(t: dict) -> dict:
+    """Returns only key fields for list views — keeps tool responses compact."""
+    stage = t.get("stage_id")
+    return {
+        "id":      t.get("id"),
+        "name":    t.get("name"),
+        "asunto":  t.get("asunto"),
+        "stage":   stage[1] if isinstance(stage, list) and len(stage) > 1 else stage,
+        "urgency": t.get("urgency_id"),
+    }
+
+
 def set_ticket_port(port: ITicketPort) -> None:
     global _port
     _port = port
@@ -72,19 +86,19 @@ def set_rag_port_for_tickets(rag_port: IRAGPort) -> None:
 def create_ticket(
     asunto: str,
     descripcion: str,
-    ticket_type_id: str,
-    category_id: str,
-    urgency_id: str,
-    impact_id: str,
-    priority_id: str,
-    user_id: str,
-    subcategory_id: str = None,
-    element_id: str = None,
+    ticket_type_id: Union[int, str],
+    category_id: Union[int, str],
+    urgency_id: Union[int, str],
+    impact_id: Union[int, str],
+    priority_id: Union[int, str],
+    user_id: Union[int, str],
+    subcategory_id: Optional[Union[int, str]] = None,
+    element_id: Optional[Union[int, str]] = None,
     system_equipment: str = "",
 ) -> dict:
     """
     Creates a new support ticket.
-    IMPORTANT: Always call suggest_solution_before_ticket BEFORE this tool.
+    IMPORTANT: Always call suggest_solution BEFORE this tool.
     Only call this if the user confirmed no existing solution worked,
     or if no solution was found.
 
@@ -120,33 +134,45 @@ def create_ticket(
 
 @tool
 @backend_retry
-def get_my_created_tickets(user_id: str) -> list:
+def get_my_created_tickets(user_id: Union[int, str]) -> list:
     """
-    Returns all tickets created by the current user.
-    Shows: ticket name, subject, stage, urgency, creation date.
+    Returns the most recent tickets created by the current user (up to 10).
+    Shows: ticket name, subject, stage, urgency.
+    For full details on a specific ticket, use get_ticket_detail.
     """
-    return _port.get_tickets_by_creator(int(user_id))
+    tickets = _port.get_tickets_by_creator(int(user_id))
+    limited = tickets[-10:] if len(tickets) > 10 else tickets
+    result = [_slim_ticket(t) for t in limited]
+    if len(tickets) > 10:
+        result.append({"_note": f"Showing last 10 of {len(tickets)} tickets."})
+    return result
 
 
 # ── Resolver tools ────────────────────────────────────────────────────────────
 
 @tool
 @backend_retry
-def get_my_assigned_tickets(user_id: str) -> list:
+def get_my_assigned_tickets(user_id: Union[int, str]) -> list:
     """
-    Returns all tickets currently assigned to the current resolver.
-    Shows: ticket name, subject, stage, urgency, requestor, creation date.
+    Returns tickets currently assigned to the current resolver (up to 10).
+    Shows: ticket name, subject, stage, urgency.
+    For full details on a specific ticket, use get_ticket_detail.
     """
-    return _port.get_tickets_by_assignee(int(user_id))
+    tickets = _port.get_tickets_by_assignee(int(user_id))
+    limited = tickets[-10:] if len(tickets) > 10 else tickets
+    result = [_slim_ticket(t) for t in limited]
+    if len(tickets) > 10:
+        result.append({"_note": f"Showing last 10 of {len(tickets)} tickets."})
+    return result
 
 
 @tool
 @backend_retry
 def resolve_ticket(
-    ticket_id: str,
+    ticket_id: Union[int, str],
     motivo_resolucion: str,
     causa_raiz: str,
-    user_id: str,
+    user_id: Union[int, str],
 ) -> dict:
     """
     Marks a ticket as resolved.
@@ -167,8 +193,8 @@ def resolve_ticket(
         _rag_port.add_resolved_ticket(
             ticket_id=int(ticket_id),
             ticket_name=ticket.get("name") or f"TCK-{int(ticket_id):04d}",
-            ticket_type=ticket.get("ticket_type", ""),
-            category=ticket.get("category", ""),
+            ticket_type=ticket.get("ticket_type") or ticket.get("tipo_requerimiento", ""),
+            category=ticket.get("category") or ticket.get("categoria", ""),
             description=ticket.get("descripcion", ""),
             motivo_resolucion=motivo_resolucion,
             causa_raiz=causa_raiz,
@@ -181,12 +207,12 @@ def resolve_ticket(
 
 @tool
 @backend_retry
-def get_ticket_detail(ticket_id: str, user_id: str, user_role: str) -> dict:
+def get_ticket_detail(ticket_id: Union[int, str], user_id: Union[int, str], user_role: str) -> dict:
     """
     Returns full details of a specific ticket.
     Includes: all fields, SLA status, deadline, stage, assignment info.
 
-    After calling this, proactively call suggest_solution_before_ticket
+    After calling this, proactively call suggest_solution
     using the ticket's description and category.
     """
     return _port.get_ticket_detail(int(ticket_id), int(user_id), user_role)
@@ -194,7 +220,7 @@ def get_ticket_detail(ticket_id: str, user_id: str, user_role: str) -> dict:
 
 @tool
 @backend_retry
-def update_ticket(ticket_id: str, fields_json: str, user_id: str) -> dict:
+def update_ticket(ticket_id: Union[int, str], fields_json: str, user_id: Union[int, str]) -> dict:
     """
     Updates specific fields of a ticket.
     Always confirm with the user before calling this.
@@ -218,24 +244,29 @@ def update_ticket(ticket_id: str, fields_json: str, user_id: str) -> dict:
 @backend_retry
 def get_all_tickets(filters_json: str = "{}") -> list:
     """
-    Returns all tickets in the system. For supervisors only.
-    Optional filters as JSON string.
-    Example: '{"stage_id": 1}' to filter by stage.
+    Returns tickets in the system for supervisors (up to 15 most recent).
+    Optional filters as JSON string. Example: '{"stage_id": 1}' to filter by stage.
+    For full details on a specific ticket, use get_ticket_detail.
     """
     try:
         filters = json.loads(filters_json)
     except json.JSONDecodeError:
         filters = {}
-    return _port.get_all_tickets(filters)
+    tickets = _port.get_all_tickets(filters)
+    limited = tickets[-15:] if len(tickets) > 15 else tickets
+    result = [_slim_ticket(t) for t in limited]
+    if len(tickets) > 15:
+        result.append({"_note": f"Showing last 15 of {len(tickets)} tickets. Use filters to narrow results."})
+    return result
 
 
 @tool
 @backend_retry
 def assign_ticket(
-    ticket_id: str,
-    assignee_id: str,
-    agent_group_id: str,
-    user_id: str,
+    ticket_id: Union[int, str],
+    assignee_id: Union[int, str],
+    agent_group_id: Union[int, str],
+    user_id: Union[int, str],
 ) -> dict:
     """
     Assigns a ticket to a resolver agent.
@@ -253,7 +284,7 @@ def assign_ticket(
 
 @tool
 @backend_retry
-def reopen_ticket(ticket_id: str, reason: str, user_id: str) -> dict:
+def reopen_ticket(ticket_id: Union[int, str], reason: str, user_id: Union[int, str]) -> dict:
     """
     Reopens a resolved or closed ticket.
     Always confirm with the user before calling this.
@@ -264,6 +295,41 @@ def reopen_ticket(ticket_id: str, reason: str, user_id: str) -> dict:
         user_id: Current supervisor's user ID
     """
     return _port.reopen_ticket(int(ticket_id), reason, int(user_id))
+
+
+@tool
+@backend_retry
+def approve_ticket(ticket_id: Union[int, str], user_id: Union[int, str]) -> dict:
+    """
+    Approves a pending ticket so the resolver can proceed with it.
+    Only valid for tickets with approval_status: "pending".
+    Always confirm with the user before calling this.
+
+    Args:
+        ticket_id: Numeric ticket ID
+        user_id: Current supervisor's user ID
+    """
+    return _port.approve_ticket(int(ticket_id), int(user_id))
+
+
+@tool
+@backend_retry
+def reject_ticket(
+    ticket_id: Union[int, str],
+    reason: str,
+    user_id: Union[int, str],
+) -> dict:
+    """
+    Rejects a pending ticket. The resolver will be notified it does not proceed.
+    Only valid for tickets with approval_status: "pending".
+    Always confirm with the user before calling this.
+
+    Args:
+        ticket_id: Numeric ticket ID
+        reason: Clear explanation of why the ticket is rejected
+        user_id: Current supervisor's user ID
+    """
+    return _port.reject_ticket(int(ticket_id), reason, int(user_id))
 
 
 # ── Delete — implemented but excluded from all tool lists ─────────────────────
@@ -297,6 +363,7 @@ def get_resolver_tools() -> list:
         get_my_assigned_tickets,
         get_ticket_detail,
         resolve_ticket,
+        update_ticket,
     ]
 
 
@@ -310,4 +377,6 @@ def get_supervisor_tools() -> list:
         get_ticket_detail,
         assign_ticket,
         reopen_ticket,
+        approve_ticket,
+        reject_ticket,
     ]

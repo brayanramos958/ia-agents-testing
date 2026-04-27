@@ -28,6 +28,10 @@ class Ticket(Base):
     asignado_a = Column(String, nullable=True)                  # user_id del resueltor
     agent_group_id = Column(String, nullable=True)              # nombre del grupo
 
+    # Aprobación
+    approval_status = Column(String, nullable=True)             # pending | approved | rejected
+    rejection_reason = Column(Text, nullable=True)
+
     # Resolución
     resolucion = Column(Text, nullable=True)                    # texto libre de resolución
     causa_raiz = Column(Text, nullable=True)

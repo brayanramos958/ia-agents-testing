@@ -1,13 +1,14 @@
 """
 RAG tools — knowledge base search and AI feedback recording.
 
-suggest_solution_before_ticket is the enforcement point for the
-resolution-first flow. The creator prompt mandates calling it before
-create_ticket. The tool's docstring reinforces this as a precondition.
+suggest_solution is the enforcement point for the resolution-first flow.
+The creator prompt mandates calling it before create_ticket.
 
 record_agent_feedback stores the user's rating of the AI's helpfulness.
 This is separate from the ticket system's own satisfaction survey.
 """
+
+from typing import Optional, Union
 
 from langchain_core.tools import tool
 from ports.rag_port import IRAGPort, SuggestionResult
@@ -22,47 +23,28 @@ def set_rag_port(port: IRAGPort) -> None:
 
 
 @tool
-def suggest_solution_before_ticket(description: str, category: str = "") -> dict:
+def suggest_solution(description: str, category: str = "") -> str:
     """
     Searches the knowledge base for resolved tickets similar to the user's problem.
 
     MANDATORY: Call this BEFORE create_ticket — every single time.
-    This is non-negotiable. The resolution-first flow requires it.
 
-    If solutions_found is True AND confidence >= 0.6:
-        - Present the solution to the user clearly
-        - Ask: "Does this resolve your issue, or would you like to create a ticket?"
-        - If resolved: ask for rating, call record_agent_feedback with
-          feedback_type='solution_suggested', then stop (no ticket created)
-        - If not resolved: continue to collect ticket data and call create_ticket
-
-    If solutions_found is False OR confidence < 0.6:
-        - Inform the user: "No previous solutions found in our knowledge base
-          for this type of problem."
-        - Proceed to collect ticket data and call create_ticket
+    Returns a plain-text result you must read and act on:
+    - If it says "SOLUCIÓN ENCONTRADA": present the solution to the user and ask
+      if it resolves their issue. If yes → record_agent_feedback, no ticket.
+      If no → proceed to collect ticket data and call create_ticket.
+    - If it says "SIN SOLUCIONES": tell the user you'll create a ticket and
+      proceed to collect the required fields for create_ticket.
 
     Args:
         description: Natural language description of the user's problem
-        category: Category name to narrow the search (optional but improves results)
-
-    Returns:
-        {
-          "solutions_found": bool,
-          "confidence": float,   # 0.0–1.0, use 0.6 as the threshold
-          "solutions": [
-            {
-              "ticket_name": str,
-              "category": str,
-              "description": str,
-              "motivo_resolucion": str,
-              "score": float
-            },
-            ...
-          ]
-        }
+        category: Optional category name to narrow the search
     """
     if not _rag_port:
-        return {"solutions_found": False, "confidence": 0.0, "solutions": []}
+        return (
+            "SIN SOLUCIONES: No se encontraron casos similares en la base de conocimiento. "
+            "Procede a recopilar los datos del ticket y llama a create_ticket."
+        )
 
     result: SuggestionResult = _rag_port.search_similar(
         query=description,
@@ -70,29 +52,35 @@ def suggest_solution_before_ticket(description: str, category: str = "") -> dict
         k=5,
     )
 
-    return {
-        "solutions_found": result.solutions_found,
-        "confidence": result.confidence,
-        "solutions": [
-            {
-                "ticket_name": s.ticket_name,
-                "category": s.category,
-                "description": s.description,
-                "motivo_resolucion": s.motivo_resolucion,
-                "causa_raiz": s.causa_raiz,
-                "score": s.score,
-            }
-            for s in result.solutions
-        ],
-    }
+    if not result.solutions_found or result.confidence < 0.6:
+        return (
+            "SIN SOLUCIONES: No se encontraron casos similares en la base de conocimiento "
+            f"(confianza: {result.confidence:.2f}). "
+            "Procede a recopilar los datos del ticket y llama a create_ticket."
+        )
+
+    top = result.solutions[0]
+    others = ""
+    if len(result.solutions) > 1:
+        others = " También hay casos similares: " + ", ".join(
+            f"{s.ticket_name} ({s.category})" for s in result.solutions[1:3]
+        ) + "."
+
+    return (
+        f"SOLUCIÓN ENCONTRADA (confianza: {result.confidence:.2f}): "
+        f"Caso similar: {top.ticket_name} — {top.description}. "
+        f"Solución aplicada: {top.motivo_resolucion}. "
+        f"Causa raíz: {top.causa_raiz or 'No registrada'}.{others} "
+        "Presenta esta solución al usuario en pasos simples y pregunta si resolvió su problema."
+    )
 
 
 @tool
 def record_agent_feedback(
-    user_id: str,
-    rating: str,
+    user_id: Union[int, str],
+    rating: Union[int, str],
     feedback_type: str,
-    ticket_id: str = None,
+    ticket_id: Optional[Union[int, str]] = None,
     ticket_name: str = "",
     comment: str = "",
 ) -> dict:
@@ -128,4 +116,4 @@ def record_agent_feedback(
 
 def get_rag_tools() -> list:
     """RAG tools included in every role."""
-    return [suggest_solution_before_ticket, record_agent_feedback]
+    return [suggest_solution, record_agent_feedback]

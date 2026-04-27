@@ -28,6 +28,8 @@ class TicketUpdate(BaseModel):
     stage_id: Optional[str] = None
     asignado_a: Optional[str] = None
     agent_group_id: Optional[str] = None
+    approval_status: Optional[str] = None
+    rejection_reason: Optional[str] = None
 
 
 class ResolveRequest(BaseModel):
@@ -61,6 +63,8 @@ class TicketResponse(BaseModel):
     creado_por: str
     asignado_a: Optional[str] = None
     agent_group_id: Optional[str] = None
+    approval_status: Optional[str] = None
+    rejection_reason: Optional[str] = None
     resolucion: Optional[str] = None
     causa_raiz: Optional[str] = None
     fecha_creacion: datetime

@@ -72,14 +72,11 @@ async def _fetch_creator_context(user_id: int, thread_id: str) -> str:
             if not open_tickets:
                 result = "\n\n## Historial del usuario\nSin tickets abiertos actualmente."
             else:
-                lines = ["\n\n## Historial del usuario (tickets abiertos — usa esta info en el Paso 1A)"]
-                for t in open_tickets[:10]:
-                    stage = t.get("stage_id")
-                    stage_name = stage[1] if isinstance(stage, list) and len(stage) >= 2 else "N/A"
-                    lines.append(
-                        f"- {t.get('name', 'N/A')}: {t.get('asunto', 'N/A')} "
-                        f"[estado: {stage_name}]"
-                    )
+                lines = ["\n\n## Historial del usuario (tickets abiertos):"]
+                for t in open_tickets[:3]:
+                    lines.append(f"- {t.get('name','N/A')}: {t.get('asunto','N/A')}")
+                if len(open_tickets) > 3:
+                    lines.append(f"(+{len(open_tickets)-3} mas)")
                 result = "\n".join(lines)
     except Exception as exc:
         _log.debug("Could not pre-fetch user tickets for context: %s", exc)
@@ -173,15 +170,24 @@ def get_tools_for_role(role: str) -> list:
     LangGraph enforces this at the graph level — a role cannot call tools
     that are not in its list regardless of what the prompt says.
     """
-    catalog = get_catalog_tools()
-    rag     = get_rag_tools()
+    rag = get_rag_tools()
+    from tools.user_tools import (
+        get_ticket_types, get_categories, get_urgency_levels,
+        get_impact_levels, get_priority_levels,
+        get_resolvers, get_agent_groups, get_stages,
+    )
 
     if role == "creador":
-        return get_creator_tools() + catalog + rag
+        creator_catalog = [get_ticket_types, get_categories, get_urgency_levels,
+                           get_impact_levels, get_priority_levels]
+        return get_creator_tools() + creator_catalog + rag
+
     if role == "resueltor":
-        return get_resolver_tools() + catalog + rag
+        return get_resolver_tools() + rag
+
     if role == "supervisor":
-        return get_supervisor_tools() + catalog + rag
+        supervisor_catalog = [get_resolvers, get_agent_groups, get_stages]
+        return get_supervisor_tools() + supervisor_catalog + rag
 
     return []
 
@@ -223,8 +229,8 @@ def create_agent(tools: list):
         system = [all_system[-1]] if all_system else []
         non_system = [m for m in msgs if not isinstance(m, _SM)]
 
-        # Paso 1: corta a los últimos 12
-        window = non_system[-12:] if len(non_system) > 12 else non_system
+        # Paso 1: corta a los últimos 8
+        window = non_system[-8:] if len(non_system) > 8 else non_system
 
         # Paso 2: detecta ToolMessages huérfanos al inicio de la ventana.
         # Un TM es huérfano si no hay ningún AIMessage con tool_calls antes de él.
@@ -267,7 +273,7 @@ def create_agent(tools: list):
             clean.append(m)
         sanitized = clean
 
-        _log.debug("trim_hook: %d messages → sending %d", len(non_system), len(sanitized))
+        _log.debug("trim_hook: %d messages -> sending %d", len(non_system), len(sanitized))
 
         return {"messages": system + sanitized}
 
@@ -370,6 +376,21 @@ async def get_response(
     )
 
     result = await agent.ainvoke(input_data, config=config)
+
+    # Invalidate creator context cache when create_ticket succeeds so the next
+    # message reflects the newly created ticket in the user's history.
+    if user_role == "creador":
+        from langchain_core.messages import ToolMessage as _TMsg
+        import json as _json
+        for msg in result.get("messages", []):
+            if isinstance(msg, _TMsg) and getattr(msg, "name", None) == "create_ticket":
+                try:
+                    payload = _json.loads(msg.content) if isinstance(msg.content, str) else msg.content
+                    if isinstance(payload, dict) and payload.get("success"):
+                        invalidate_creator_context(thread_id)
+                except Exception:
+                    pass
+                break
 
     # Find the last AIMessage that has text content (not just tool calls)
     for msg in reversed(result.get("messages", [])):

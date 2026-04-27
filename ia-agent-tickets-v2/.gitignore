@@ -55,3 +55,12 @@ agent/agent-v2/.venv/
 
 ITS_Helpdesk_Docst_no_editable/
 agent/agent-v2/iniciar.txt 
+
+
+# LangGraph SQLite state — binary, cambia en cada run, no tiene valor en git
+checkpoints.db
+checkpoints.db-shm
+checkpoints.db-wal
+feedback.db
+
+access.txt

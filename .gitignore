@@ -4,3 +4,12 @@
 node_modules/
 
 ITS_Helpdesk_Docst_no_editable
+
+# LangGraph SQLite state — binary, cambia en cada run, no tiene valor en git
+checkpoints.db
+checkpoints.db-shm
+checkpoints.db-wal
+feedback.db
+
+# ChromaDB vector store — se re-siembra automáticamente al startup
+vector_store/

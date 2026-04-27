@@ -190,6 +190,22 @@ class ExpressAdapter(ITicketPort):
             "supervisor",
         )
 
+    def approve_ticket(self, ticket_id: int, user_id: int) -> dict:
+        return self._put(
+            f"/api/tickets/{ticket_id}",
+            {"approval_status": "approved"},
+            user_id,
+            "supervisor",
+        )
+
+    def reject_ticket(self, ticket_id: int, reason: str, user_id: int) -> dict:
+        return self._put(
+            f"/api/tickets/{ticket_id}",
+            {"approval_status": "rejected", "rejection_reason": reason},
+            user_id,
+            "supervisor",
+        )
+
     def delete_ticket(self, ticket_id: int, user_id: int) -> dict:
         # SECURITY: This method is implemented but delete_ticket tool is excluded
         # from all role tool lists. See tools/ticket_tools.py for the exclusion comment.

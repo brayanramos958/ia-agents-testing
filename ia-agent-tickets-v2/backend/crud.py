@@ -17,6 +17,7 @@ def get_tickets(
     created_by: str = None,
     asignado_a: str = None,
     estado: str = None,
+    approval_status: str = None,
 ):
     query = db.query(models.Ticket)
 
@@ -29,6 +30,8 @@ def get_tickets(
         query = query.filter(
             models.Ticket.stage_id.ilike(estado)
         )
+    if approval_status:
+        query = query.filter(models.Ticket.approval_status == approval_status)
 
     return query.offset(skip).limit(limit).all()
 

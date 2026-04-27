@@ -9,19 +9,27 @@ from typing import List
 
 class Settings(BaseSettings):
     # ── LLM ────────────────────────────────────────────────────────────────
-    groq_api_key: str
+    # "groq"   → Groq API (default, production)
+    # "ollama" → Ollama local (development)
+    llm_provider: str = "groq"
+
+    groq_api_key: str = ""
     llm_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
     openrouter_api_key: str = ""
-    openrouter_model: str = "meta-llama/llama-3.3-70b-instruct:free"
+    openrouter_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
+
+    # ── Ollama (only used when llm_provider=ollama) ─────────────────────────
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "gemma3"
     # Modelos free de OpenRouter usados como cadena de fallback cuando Groq hace rate limit.
-    # Se intentan en orden — si uno falla con 429, se pasa al siguiente.
+    # Se intentan en orden — si uno falla con 429/402, se pasa al siguiente.
     # Verificados en OpenRouter API (abril 2026) — todos soportan tool calling y son gratuitos.
     openrouter_fallback_models: List[str] = [
-        "meta-llama/llama-3.3-70b-instruct:free",
-        "nvidia/nemotron-3-super-120b-a12b:free",
-        "openai/gpt-oss-120b:free",
-        "openai/gpt-oss-20b:free",
-        "google/gemma-4-31b-it:free",
+        "nvidia/nemotron-3-super-120b-a12b:free",   # 120B, 262K ctx
+        "google/gemma-4-31b-it:free",                # 31B,  262K ctx
+        "google/gemma-4-26b-a4b-it:free",            # 26B,  262K ctx
+        "minimax/minimax-m2.5:free",                 # 196K ctx
+        "nvidia/nemotron-3-nano-30b-a3b:free",       # 30B,  256K ctx
     ]
 
     # ── Backend adapter ─────────────────────────────────────────────────────

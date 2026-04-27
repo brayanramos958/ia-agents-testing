@@ -2,29 +2,37 @@
 
 ---
 
-## Estado actual — 2026-04-17 (última revisión)
+## Estado actual — 2026-04-24 (última revisión)
 
 > **Tests**: `scratch/test_improvements.py` (30 tests) + `scratch/test_bugs_ab.py` (9 tests) — todos verdes.
+> `scratch/test_fullflow.py` (14 turnos / 3 roles) — **14/14 PASS** confirmado 2026-04-22 y 2026-04-23 con Groq llama-4-scout-17b.
+> `scratch/test_rol.py` — test modular por rol. Supervisor: **4/4 PASS** confirmado 2026-04-24.
+> RAG operativo: 3 tickets sembrados (TCK-0001, TCK-0002, TCK-0016). Scores correctos post-fix: 0.688–0.815.
+> Flujo aprobación supervisor: **PASS** — approve y reject verificados en BD (2026-04-24).
 
 ### ✅ Implementado y funcionando (probado en desarrollo)
 
 | Archivo | Estado | Notas |
 |---|---|---|
-| `config/settings.py` | ✅ | Pydantic Settings, single source of truth. Fallbacks limpiados: removidos `qwen3-coder` y `nemotron-nano` |
+| `config/settings.py` | ✅ | Pydantic Settings, single source of truth. Fallbacks actualizados 2026-04-21: 5 modelos válidos verificados con tool calling (`nvidia/nemotron-3-super-120b-a12b:free`, `google/gemma-4-31b-it:free`, `google/gemma-4-26b-a4b-it:free`, `minimax/minimax-m2.5:free`, `nvidia/nemotron-3-nano-30b-a3b:free`). Los anteriores `meta-llama/llama-3.3-70b-instruct:free` y `openai/gpt-oss-*` ya no existen en OpenRouter |
 | `ports/ticket_port.py` | ✅ | ITicketPort con nombres Odoo |
 | `ports/rag_port.py` | ✅ | IRAGPort + SuggestionResult. `SolutionItem` incluye `causa_raiz`. `add_resolved_ticket` acepta `causa_raiz` con default `""` (backwards compat) |
-| `adapters/express_adapter.py` | ✅ | Adapter de desarrollo contra Express + SQLite |
-| `rag/store.py` | ✅ | ChromaDB seeding desde API REST. `causa_raiz` embebida en `document_text` y metadata. `search_similar` retorna `causa_raiz` en cada resultado |
+| `adapters/express_adapter.py` | ✅ | Adapter de desarrollo contra FastAPI + SQLite (puerto 8000). Nota: el backend NO es Node.js/Express — es FastAPI Python en `ia-agent-tickets-v2/backend/main.py` |
+| `rag/store.py` | ✅ | ChromaDB seeding desde API REST. `causa_raiz` embebida en `document_text` y metadata. **2026-04-23**: `similarity_search_with_score` + conversión `sim = 1 - (dist/2)` — los scores ahora son correctos [0,1] (antes retornaba distancias coseno sin normalizar) |
 | `rag/embeddings.py` | ✅ | HuggingFace singleton `all-MiniLM-L6-v2` |
-| `tools/ticket_tools.py` | ✅ | create, get, resolve, assign, reopen, update. `_resolve_id()` convierte nombres LLM → IDs de catálogo sin round-trip extra. `resolve_ticket` pasa `causa_raiz` al RAG en tiempo real. Retry con `tenacity` (3 intentos, backoff exponencial 2s→10s) |
-| `tools/user_tools.py` | ✅ | catálogos: tipos, categorías 3 niveles, urgencia, impacto, prioridad |
-| `tools/rag_tools.py` | ✅ | `suggest_solution_before_ticket` expone `causa_raiz` al LLM. `record_agent_feedback` |
+| `tools/ticket_tools.py` | ✅ | create, get, resolve, assign, reopen, update. `_resolve_id()` convierte nombres LLM → IDs. **2026-04-22**: `update_ticket` agregado a `get_resolver_tools()`. **2026-04-23 (Bug-R)**: todos los params de ID cambiados a `Union[int, str]` — Groq valida schemas server-side antes de Python. `resolve_ticket` usa fallback `tipo_requerimiento`/`categoria` para el RAG (Express no usa `ticket_type`/`category`) |
+| `tools/user_tools.py` | ✅ | catálogos: tipos, categorías 3 niveles, urgencia, impacto, prioridad. **2026-04-21 (Bug-L)**: `parent_id` cambiado a `Union[int, str, None]` + validator que normaliza `"null"` → None |
+| `tools/rag_tools.py` | ✅ | `suggest_solution` expone `causa_raiz` al LLM. **2026-04-23 (Bug-Q)**: `record_agent_feedback` — `user_id`, `rating`, `ticket_id` cambiados a `Union[int, str]` |
+| `scratch/test_rol.py` | ✅ | **NUEVO 2026-04-23** — test modular por rol. Uso: `py scratch/test_rol.py creador\|resueltor\|supervisor\|all [--delay N]`. ~50-60K tokens/bloque. Incluye estimado de tokens consumidos |
+| `tools/ticket_tools.py` (approve/reject) | ✅ | **2026-04-24**: `approve_ticket` y `reject_ticket` agregadas como tools con `@tool @backend_retry`. Incluidas en `get_supervisor_tools()` |
+| `ports/ticket_port.py` (approve/reject) | ✅ | **2026-04-24**: `approve_ticket(ticket_id, user_id)` y `reject_ticket(ticket_id, reason, user_id)` agregados como métodos abstractos |
+| `adapters/express_adapter.py` (approve/reject) | ✅ | **2026-04-24**: Implementados via `PUT /api/tickets/:id` con `{"approval_status": "approved/rejected", "rejection_reason": reason}` |
 | `prompts/base.py` | ✅ | Frustración → ticket urgente + contacto humano. Reglas anti-prompt-injection (Capa 1) |
 | `prompts/creator.py` | ✅ | Historial inyectado en contexto. Paso 1B hardware (pasos de verificación). Paso 1B software (explicación proceso aprobación 4 pasos). Descripción en 3ra persona con voz del usuario |
-| `prompts/resolver.py` | ✅ | Tickets agrupados por SLA. Verifica `approval_status`. Guía `motivo_resolucion` + `causa_raiz` |
-| `prompts/supervisor.py` | ✅ | Resumen ejecutivo al iniciar. Priorización visual por SLA |
+| `prompts/resolver.py` | ✅ | Tickets agrupados por SLA. Verifica `approval_status`. Guía `motivo_resolucion` + `causa_raiz`. **2026-04-21**: removido `get_categories` del listado de tools del prompt (no está en el toolset del rol) |
+| `prompts/supervisor.py` | ✅ | Resumen ejecutivo al iniciar. Priorización visual por SLA. **2026-04-21**: removido `get_categories` (no disponible para este rol), agregado `get_stages` (sí disponible). **2026-04-24**: agregado flujo completo de aprobación/rechazo con confirmación, conteo de pendientes en resumen inicial |
 | `feedback/collector.py` | ✅ | SQLite-backed, evaluación del agente AI (≠ CSAT del ticket) |
-| `core/graph.py` | ✅ | Groq primario + OpenRouter fallback + AsyncSqliteSaver |
+| `core/graph.py` | ✅ | Groq primario + OpenRouter fallback + AsyncSqliteSaver. **2026-04-21**: `timeout=60` en cada modelo fallback (previene esperas >3000s). `APIStatusError` agregado a `exceptions_to_handle` (captura error 402 spend-limit de OpenRouter). Ollama: `think=False` + `num_ctx=8192` para evitar OOM en CPU |
 | `core/agent.py` | ✅ | `_trim_hook` (ventana 12 msgs, saneado de huérfanos, **solo conserva último SystemMessage**). `_fetch_creator_context` inyecta historial en system prompt (**cacheado por thread_id**). `_prepare_invocation` elimina lógica duplicada entre `/chat` y `/stream`. Detección de thread corrupto con `aget_state()`. `invalidate_creator_context()` para limpiar cache explícitamente |
 | `api/routes/chat.py` | ✅ | sesión diaria: `thread_id = user-{id}-{date.today()}` |
 | `api/routes/stream.py` | ✅ | POST /agent/stream — SSE token a token via `astream_events` |
@@ -51,9 +59,7 @@
 
 ### 🔴 Bugs confirmados (pendientes de fix)
 
-| ID | Severidad | Descripción | Archivo | Fix |
-|----|-----------|-------------|---------|-----|
-| Bug-D | **MEDIO** | `invalidate_creator_context` no se llama después de `create_ticket` exitoso. El cache retiene el historial viejo para el resto de la sesión. **Parcialmente cubierto**: sí se llama en `_prepare_invocation` cuando detecta thread corruption (`core/agent.py:339`), pero el caso post-`create_ticket` sigue sin fix | `api/routes/chat.py`, `api/routes/stream.py` | Detectar respuesta exitosa del agente post-`create_ticket` e invalidar el cache. Alternativa simple: siempre invalidar en la route después de cada respuesta del creador |
+> Sin bugs críticos pendientes al 2026-04-23. Los pendientes abiertos son mejoras y flujos incompletos (ver sección ❌ más abajo).
 
 ---
 
@@ -83,7 +89,7 @@
 ### ❌ Pendiente / No implementado
 
 #### Flujos incompletos
-- [ ] **Supervisor: aprobación de tickets** — `resolver.py:29` bloquea tickets con `approval_status: "pending"` pero no existe ninguna tool de aprobación en el supervisor ni en `ticket_tools.py`. Un ticket pendiente queda bloqueado sin salida. Requiere tool `approve_ticket` / `reject_ticket` + agregarla al tool set del supervisor
+- [x] **Supervisor: aprobación de tickets** — **RESUELTO 2026-04-24**. `approve_ticket` y `reject_ticket` implementadas en `ticket_tools.py`, `ports/ticket_port.py`, `adapters/express_adapter.py`. Flujo completo en `prompts/supervisor.py`. Backend DEV extendido con columnas `approval_status` y `rejection_reason`. Verificado: approve y reject persisten en BD, supervisor detecta pendientes con filtro `approval_status=pending`.
 - [ ] **Prefetch de contexto para resolutor** — el creador tiene `_fetch_creator_context` precargado en el system prompt; el resolutor empieza ciego y debe esperar que el agente llame `get_my_assigned_tickets` antes de ser útil. Implementar `_fetch_resolver_context(user_id, thread_id)` análogo al del creador
 
 #### Calidad del RAG
@@ -105,6 +111,7 @@
 - [ ] **Tool `add_note_to_ticket`** — agregar nota interna a un ticket existente (`tools/ticket_tools.py`)
 
 #### Requieren cambios en Express backend (desarrollo):
+- [x] `approval_status` y `rejection_reason` — **RESUELTO 2026-04-24**. Columnas agregadas al modelo SQLAlchemy, schema Pydantic y DB SQLite via `ALTER TABLE`. Filtro `?approval_status=pending` disponible en `GET /api/tickets`.
 - [ ] `GET /api/tickets/:id` — incluir historial de acciones
 - [ ] `POST /api/tickets/:id/notes` — agregar notas internas
 
@@ -142,6 +149,22 @@
 | `f"TCK-{ticket_id:04d}"` con `ticket_id: str` → `ValueError` en fallback de `resolve_ticket` | `tools/ticket_tools.py` | Cambiado a `ticket.get("name") or f"TCK-{int(ticket_id):04d}"` (cortocircuito evita evaluación eager) |
 | **Bug-A** — `_fetch_creator_context` filtraba por `t.get("state","")` (campo inexistente en Odoo). Todos los tickets aparecían "abiertos" incluyendo cerrados/resueltos | `core/agent.py` | Nuevo `_is_open(ticket)` que inspecciona `stage_id[1].lower()` contra set de nombres cerrados. `stage_id=False` se trata como abierto |
 | **Bug-B** — `get_tickets_by_creator` devolvía tickets cerrados (sin filtro de stage), inconsistente con `get_tickets_by_assignee` | `adapters/odoo_adapter.py` | Agregado `["stage_id.is_close","=",False]` al domain. El stage name ahora aparece correctamente en el historial |
+| **Bug-F** — Prompt resueltor listaba `update_ticket` en tools disponibles pero no estaba en `get_resolver_tools()`. LangGraph fallaba silenciosamente cuando el LLM intentaba llamarla | `tools/ticket_tools.py` | `update_ticket` agregado a `get_resolver_tools()` |
+| **Bug-G** — Prompt resueltor listaba `get_categories` que fue removida del toolset del rol en optimización anterior. Causaba error de tool-not-found | `prompts/resolver.py` | `get_categories` removida del listado del prompt |
+| **Bug-H** — Prompt supervisor listaba `get_categories` que fue removida del toolset del rol. Causaba "no puedo acceder al sistema" en turno de asignación | `prompts/supervisor.py` | `get_categories` removida, `get_stages` agregada (tool que SÍ tiene disponible) |
+| **Bug-I** — Fallback chain sin timeout: si OpenRouter no respondía, el agente esperaba indefinidamente. Causó espera de 3266s (54 min) en un turno del supervisor | `core/graph.py` | `timeout=60` en cada `ChatOpenAI` del fallback |
+| **Bug-J** — Error `402 spend-limit` de OpenRouter no capturado: subía como HTTP 500 en lugar de intentar el siguiente modelo fallback | `core/graph.py` | `APIStatusError` agregado a `exceptions_to_handle` |
+| **Bug-K** — 3 de 5 modelos en `openrouter_fallback_models` eran inválidos (`meta-llama/llama-3.3-70b-instruct:free`, `openai/gpt-oss-120b:free`, `openai/gpt-oss-20b:free`). Causaban 404 inmediato y elongaban la cadena innecesariamente | `config/settings.py` | Lista reemplazada por 5 modelos verificados en OpenRouter API (abril 2026) con tool calling confirmado |
+| **Bug-L** (2026-04-22) — `get_categories` schema rechazado por Groq. `parent_id="null"` (string) enviado por LLM causaba error 400 server-side. Schema decía `anyOf: [integer, null]` pero LLM mandaba string | `tools/user_tools.py` | `_CategoriesInput(BaseModel)` con `Union[int, str, None]` + validator que normaliza `"null"` string → None |
+| **Bug-N** (2026-04-22) — Error 413 (TPM) por checkpoints acumulados del mismo día. `thread_id=None` → servidor generaba `user-{id}-{date.today()}`, reutilizando historia entre runs | `scratch/test_fullflow.py` | `_slim_ticket()` helper + límites en listados (10/10/15). Root cause: checkpoints acumulados, no el prompt |
+| **Bug-O** (2026-04-22) — `test_fullflow.py` T2.4 con TCK-0001 hardcodeado causaba false-positive PASS si el ticket ya estaba resuelto | `scratch/test_fullflow.py` | Mensaje dinámico que referencia el primer ticket de la lista en lugar de nombre hardcodeado |
+| **Bug-P** (2026-04-22) — Cada re-run del mismo día reutilizaba `thread_id = user-{id}-{date.today()}`, acumulando historial en checkpoints.db hasta exceder 30K TPM de Groq | `scratch/test_fullflow.py` | `RUN_ID = int(time.time())` al inicio + `thread_id = test-{RUN_ID}-user-{id}` — cada run tiene threads únicos |
+| **Bug-D** (2026-04-22) — `invalidate_creator_context` no se llamaba tras `create_ticket` exitoso. Cache retiene historial viejo. | `core/agent.py` | Detección de `ToolMessage` con `success: True` de `create_ticket` → invalida cache. Confirmado PASS en test 14/14 |
+| **Bug-Q** (2026-04-23) — `record_agent_feedback`: `ticket_id`, `user_id`, `rating` declarados como `str` pero LLM manda integers. Groq rechaza 400 antes de llegar a Python | `tools/rag_tools.py` | Cambiados a `Union[int, str]` / `Optional[Union[int, str]]` |
+| **Bug-R** (2026-04-23) — Todos los params de ID en todas las tools de `ticket_tools.py` declarados como `str`. LLM manda integers → Groq 400 server-side validation | `tools/ticket_tools.py` | Todos los params de ID cambiados a `Union[int, str]` (8 tools afectadas) |
+| **Bug-RAG-1** (2026-04-23) — `vector_store/` tenía 5 docs de BD antigua (iteración anterior). `initialize_from_resolved_tickets` tiene guard `count() > 0 → skip` → nunca re-siembra | `vector_store/` | Borrar el directorio para forzar re-seed. Agregado a `.gitignore` |
+| **Bug-RAG-2** (2026-04-23) — `similarity_search_with_relevance_scores` retornaba distancias coseno sin normalizar (rango [-1, 1]). Scores negativos nunca superaban el umbral 0.6 → RAG siempre "SIN SOLUCIONES" | `rag/store.py` | Cambio a `similarity_search_with_score` + conversión `sim = 1 - (dist / 2)` → scores en [0, 1] |
+| **Bug-RAG-3** (2026-04-23) — `resolve_ticket` llamaba `add_resolved_ticket` con `ticket.get("ticket_type")` y `ticket.get("category")` — vacíos porque Express usa `tipo_requerimiento` y `categoria` | `tools/ticket_tools.py` | Fallback: `ticket.get("ticket_type") or ticket.get("tipo_requerimiento", "")` |
 
 ---
 

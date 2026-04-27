@@ -1,9 +1,13 @@
 """
 LLM and checkpointer factory functions.
 
-build_llm()          → Groq primary + OpenRouter fallback on rate limit
+build_llm()          → builds LLM based on LLM_PROVIDER env var
 init_checkpointer()  → async init: opens DB connection, stores instance
 build_checkpointer() → returns the initialized instance (or MemorySaver as fallback)
+
+Supported LLM providers (LLM_PROVIDER):
+  groq   → Groq API primary + OpenRouter fallback chain (default, production)
+  ollama → Ollama local server (development)
 
 Supported checkpoint backends:
   sqlite   → AsyncSqliteSaver   (dev / single-worker)
@@ -19,23 +23,42 @@ from config.settings import settings
 _checkpointer_instance = None
 
 
-def build_llm():
+def _build_ollama_llm():
+    from langchain_ollama import ChatOllama
+    llm = ChatOllama(
+        base_url=settings.ollama_base_url,
+        model=settings.ollama_model,
+        temperature=0.1,
+        num_ctx=8192,  # cap context to prevent OOM crashes on CPU
+        think=False,   # disable Qwen3 chain-of-thought — reduces tokens and prevents crashes
+    )
+    print(f"[LLM] Ollama: {settings.ollama_model} @ {settings.ollama_base_url} (ctx=8192, think=off)")
+    return llm
+
+
+def _build_groq_llm():
     """
     Primario: Groq meta-llama/llama-4-scout-17b-16e-instruct.
 
     Cadena de fallback cuando Groq (o cualquier modelo previo) devuelve 429:
       Groq → OpenRouter[0] → OpenRouter[1] → ... → OpenRouter[N]
-
-    with_fallbacks() intenta cada fallback en orden hasta que uno responde.
-    Se interceptan tanto groq.RateLimitError como openai.RateLimitError
-    para cubrir errores de rate limit en cualquier punto de la cadena.
     """
+    if not settings.groq_api_key:
+        raise RuntimeError(
+            "LLM_PROVIDER=groq requires GROQ_API_KEY to be set in .env.\n"
+            "To use Ollama locally, set LLM_PROVIDER=ollama instead."
+        )
+
     from groq import RateLimitError as GroqRateLimitError
-    from openai import RateLimitError as OpenAIRateLimitError, NotFoundError as OpenAINotFoundError
+    from openai import (
+        RateLimitError as OpenAIRateLimitError,
+        NotFoundError as OpenAINotFoundError,
+        APIStatusError as OpenAIAPIStatusError,  # catches 402 spend-limit and other HTTP errors
+    )
 
     primary = ChatGroq(
         api_key=settings.groq_api_key,
-        model="meta-llama/llama-4-scout-17b-16e-instruct",
+        model=settings.llm_model,
         temperature=0.1,
     )
 
@@ -49,17 +72,29 @@ def build_llm():
             base_url="https://openrouter.ai/api/v1",
             model=model,
             temperature=0.1,
+            timeout=60,  # fail-fast per model — prevents hanging on exhausted/slow providers
         )
         for model in settings.openrouter_fallback_models
     ]
 
-    names = " → ".join(settings.openrouter_fallback_models)
-    print(f"[LLM] Groq: llama-4-scout → fallbacks: {names}")
+    names = " -> ".join(settings.openrouter_fallback_models)
+    print(f"[LLM] Groq: {settings.llm_model} -> fallbacks: {names}")
 
     return primary.with_fallbacks(
         fallbacks,
-        exceptions_to_handle=(GroqRateLimitError, OpenAIRateLimitError, OpenAINotFoundError),
+        exceptions_to_handle=(
+            GroqRateLimitError,
+            OpenAIRateLimitError,
+            OpenAINotFoundError,
+            OpenAIAPIStatusError,  # handles 402 spend-limit from OpenRouter
+        ),
     )
+
+
+def build_llm():
+    if settings.llm_provider == "ollama":
+        return _build_ollama_llm()
+    return _build_groq_llm()
 
 
 async def init_checkpointer() -> None:
