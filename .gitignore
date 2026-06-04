@@ -1,15 +1,48 @@
-.DS_Store
-*.log
+# ── Secretos — NUNCA subir
 .env
+*.env
+!env.docker
+!env.example
+!env.*
+
+access.txt
+
+# ── Python generado
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# ── Virtual environments
+.venv*/
+venv*/
+**/.venv*/
+**/venv*/
+
+# ── Bases de datos
+*.db
+*.db-shm
+*.db-wal
+checkpoints.db*
+
+# ── Backups
+backups/
+
+# ── Vector store
+vector_store/
+
+# ── Logs
+*.log
+
+# ── Dependencias externas
 node_modules/
+**/node_modules/
 
-ITS_Helpdesk_Docst_no_editable
+# ── Módulos Odoo externos (no son parte del agente)
+ITS_Helpdesk_Docst_no_editable/
+documents_api_Production/
 
-# LangGraph SQLite state — binary, cambia en cada run, no tiene valor en git
-checkpoints.db
-checkpoints.db-shm
-checkpoints.db-wal
-feedback.db
-
-# ChromaDB vector store — se re-siembra automáticamente al startup
-vector_store/access.txt
+# ── Archivos grandes / temporales
+*.zip
+*.tar.gz
+*.rar
