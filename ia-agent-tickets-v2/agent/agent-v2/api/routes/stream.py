@@ -44,10 +44,6 @@ async def chat_stream(request: ChatRequest):
     raw_thread = request.thread_id or str(date.today())
     thread_id = f"{request.user_id}:{raw_thread}"
 
-    # Set thread_id for structured logging (Prop-9)
-    from core.context import current_thread_id
-    current_thread_id.set(thread_id)
-
     try:
         agent = get_or_create_agent(request.user_rol)
     except ValueError as exc:

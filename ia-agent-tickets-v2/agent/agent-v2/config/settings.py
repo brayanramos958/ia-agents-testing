@@ -9,21 +9,15 @@ from typing import List
 
 class Settings(BaseSettings):
     # ── LLM ────────────────────────────────────────────────────────────────
-    # "vercel"    → Vercel AI Gateway (default, production) — OpenAI-compatible
-    # "groq"      → Groq API
-    # "anthropic" → Anthropic Claude API (ChatAnthropic)
-    # "ollama"    → Ollama local (development)
+    # "vercel" → Vercel AI Gateway (default, production) — OpenAI-compatible
+    # "groq"   → Groq API
+    # "ollama" → Ollama local (development)
     llm_provider: str = "vercel"
 
     # ── Vercel AI Gateway (only used when llm_provider=vercel) ──────────────
     ai_gateway_api_key: str = ""
-    ai_gateway_model: str = "xiaomi/mimo-v2.5"
+    ai_gateway_model: str = "minimax/minimax-m2.7"
     ai_gateway_base_url: str = "https://ai-gateway.vercel.sh/v1"
-    # Security classifier: cheap model for prompt injection / jailbreak detection.
-    # Runs BEFORE the main model — rejects unsafe messages without consuming main model tokens.
-    # Use the fastest/cheapest available: openai/gpt-4.1-nano, google/gemini-3.1-flash-lite
-    security_classifier_enabled: bool = True
-    security_classifier_model: str = "openai/gpt-4.1-nano"
 
     groq_api_key: str = ""
     llm_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
@@ -43,12 +37,6 @@ class Settings(BaseSettings):
         "minimax/minimax-m2.5:free",                 # 196K ctx
         "nvidia/nemotron-3-nano-30b-a3b:free",       # 30B,  256K ctx
     ]
-
-    # ── Anthropic (only used when llm_provider=anthropic) ────────────────────
-    # Uses langchain-anthropic ChatAnthropic.
-    # Recommended: claude-haiku-4-5 (fastest, $1/M in / $5/M out, good tool calling)
-    anthropic_api_key: str = ""
-    anthropic_model: str = "claude-haiku-4-5"
 
     # ── Backend adapter ─────────────────────────────────────────────────────
     # "express"  → ExpressAdapter (local dev, simplified schema — no Odoo needed)
@@ -81,22 +69,6 @@ class Settings(BaseSettings):
     # For multi-worker production: set this via .env and back the counter with Redis.
     rate_limit_per_minute: int = 10
 
-    # ── LLM concurrency ───────────────────────────────────────────────────────
-    # Maximum simultaneous LLM calls (ainvoke/astream_events).
-    # Prevents saturation of free-tier APIs under load.
-    # Groq free: 30 req/min → 20 concurrent calls with ~5-10s response = ~120 RPM max
-    # Lower this if you see 429 from the LLM provider.
-    # Multi-worker: each worker has its own semaphore. With 2 workers:
-    #   5 per worker × 2 = 10 max concurrent LLM calls.
-    llm_concurrency_limit: int = 5
-
-    # ── LLM timeout and retry ─────────────────────────────────────────────────
-    # Timeout per LLM call in seconds (reduced for demo responsiveness).
-    # Circuit breaker: if a provider fails 3 times, it's skipped for 30s.
-    llm_timeout: int = 20
-    llm_retry_max: int = 2
-    llm_retry_base_delay: float = 2.0  # seconds, doubles each retry
-
     # ── Auth ─────────────────────────────────────────────────────────────────
     # Header: X-Agent-Key
     # To upgrade to OAuth2/JWT:
@@ -120,7 +92,7 @@ class Settings(BaseSettings):
     feedback_db_path: str = "./feedback.db"
 
     # ── Server ───────────────────────────────────────────────────────────────
-    port: int = 8002  # Port 8000 is reserved for agent-v1
+    port: int = 8001  # Port 8000 is reserved for agent-v1
     cors_origins: List[str] = ["*"]
 
     class Config:

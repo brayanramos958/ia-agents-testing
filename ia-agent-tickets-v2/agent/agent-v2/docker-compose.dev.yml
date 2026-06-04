@@ -1,0 +1,32 @@
+# Development override — live code mounting + hot reload.
+# Works on Linux native and WSL2.
+#
+# Usage:
+#   bash docker-up-dev.sh
+#
+# How it works:
+#   - .:/app bind-mounts the source directory into the container (live code)
+#   - agent_venv_dev: named volume shadows /app/.venv with container-built binaries
+#   - hf_cache_dev: named volume for HuggingFace models (downloaded on first run, cached after)
+#   - uv sync runs at startup to install/update deps into the named volume
+#   - uvicorn --reload watches Python files and reloads on change (~2s delay)
+#
+# New package added to pyproject.toml? Restart the container (no rebuild needed):
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml restart agent
+#
+# First run: HuggingFace model (~90MB) downloads into hf_cache_dev volume — takes ~1-2 min.
+# Subsequent runs: model loads from volume (<5s).
+
+services:
+  agent:
+    volumes:
+      - .:/app
+      - agent_venv_dev:/app/.venv
+      - hf_cache_dev:/root/.cache/huggingface
+    command: "bash -c 'uv sync --no-dev && uv run uvicorn main:app --host 0.0.0.0 --port 8001 --reload --reload-delay 2'"
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+
+volumes:
+  agent_venv_dev:
+  hf_cache_dev:

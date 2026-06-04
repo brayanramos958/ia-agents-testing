@@ -21,34 +21,34 @@ def set_user_port(port: ITicketPort) -> None:
 
 
 @tool
-async def get_resolvers() -> list:
+def get_resolvers() -> list:
     """
     Returns all available resolver agents.
     Use this before assigning a ticket to show the supervisor valid options.
     Each item contains: id, name (and role info if available).
     """
-    return await _port.get_resolvers()
+    return _port.get_resolvers()
 
 
 @tool
-async def get_agent_groups() -> list:
+def get_agent_groups() -> list:
     """
     Returns all available agent groups (support teams/levels).
     Use this before assigning a ticket to a group.
     Each item contains: id, name.
     """
-    return await _port.get_agent_groups()
+    return _port.get_agent_groups()
 
 
 @tool
-async def get_ticket_types() -> list:
+def get_ticket_types() -> list:
     """
     Returns all valid ticket types.
     Examples: Incidente, Solicitud, Problema, Cambio.
     Each item contains: id, name.
     Use the id when calling create_ticket (ticket_type_id field).
     """
-    return await _port.get_ticket_types()
+    return _port.get_ticket_types()
 
 
 class _CategoriesInput(BaseModel):
@@ -70,7 +70,7 @@ class _CategoriesInput(BaseModel):
 
 
 @tool(args_schema=_CategoriesInput)
-async def get_categories(parent_id: Optional[int] = None) -> list:
+def get_categories(parent_id: Optional[int] = None) -> list:
     """
     Returns categories from the 3-level hierarchy.
 
@@ -84,59 +84,48 @@ async def get_categories(parent_id: Optional[int] = None) -> list:
     Use the id from the deepest available level when calling create_ticket.
     Pass null (not the string "null") to get top-level categories.
     """
-    return await _port.get_categories(parent_id)
+    return _port.get_categories(parent_id)
 
 
 @tool
-async def get_urgency_levels() -> list:
+def get_urgency_levels() -> list:
     """
     Returns all valid urgency levels for tickets.
     Each item contains: id, name.
     Use the id when calling create_ticket (urgency_id field).
     """
-    return await _port.get_urgency_levels()
+    return _port.get_urgency_levels()
 
 
 @tool
-async def get_impact_levels() -> list:
+def get_impact_levels() -> list:
     """
     Returns all valid impact levels for tickets.
     Each item contains: id, name.
     Use the id when calling create_ticket (impact_id field).
     """
-    return await _port.get_impact_levels()
+    return _port.get_impact_levels()
 
 
 @tool
-async def get_priority_levels() -> list:
+def get_priority_levels() -> list:
     """
     Returns all valid priority levels for tickets.
     Each item contains: id, name.
     Priority is normally inferred from urgency × impact.
     Use the id when calling create_ticket (priority_id field).
     """
-    return await _port.get_priority_levels()
+    return _port.get_priority_levels()
 
 
 @tool
-async def get_stages() -> list:
+def get_stages() -> list:
     """
     Returns all workflow stages with their flags.
     Each item contains: id, name, is_start, is_resolve, is_close, is_pause.
     Useful for supervisors filtering tickets by stage.
     """
-    return await _port.get_stages()
-
-
-@tool
-async def get_origins() -> list:
-    """
-    Returns all available ticket origins (FASE 3).
-    Examples: Email, Teléfono, Web, Presencial, Bot SARA.
-    Each item contains: id, name, description.
-    Use the id when calling create_ticket (origin_id field, optional).
-    """
-    return await _port.get_origins()
+    return _port.get_stages()
 
 
 def get_catalog_tools() -> list:
@@ -150,5 +139,4 @@ def get_catalog_tools() -> list:
         get_impact_levels,
         get_priority_levels,
         get_stages,
-        get_origins,  # FASE 3: catálogo de orígenes
     ]

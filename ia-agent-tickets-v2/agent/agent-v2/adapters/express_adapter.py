@@ -86,7 +86,6 @@ class ExpressAdapter(ITicketPort):
 
     def __init__(self, base_url: str):
         self._base_url = base_url.rstrip("/")
-        self._client = httpx.AsyncClient(timeout=10.0, follow_redirects=True)
 
     def _headers(self, user_id: int, user_rol: str) -> dict:
         return {
@@ -94,43 +93,33 @@ class ExpressAdapter(ITicketPort):
             "x-user-rol": user_rol,
         }
 
-    @staticmethod
-    def _handle_connect_error(e: Exception, url: str) -> None:
-        raise ConnectionError(
-            f"BACKEND_NO_DISPONIBLE: No se puede conectar al sistema de ticketing ({url}). "
-            "El administrador debe verificar que el backend esté corriendo."
-        ) from e
-
-        self._client = httpx.AsyncClient(timeout=10.0, follow_redirects=True)
-
-    async def _get(self, path: str, params: dict = None) -> dict | list:
-        url = f"{self._base_url}{path}"
-        try:
-            response = await self._client.get(url, params=params)
+    def _get(self, path: str, params: dict = None) -> dict | list:
+        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+            response = client.get(f"{self._base_url}{path}", params=params)
             response.raise_for_status()
             return response.json()
-        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-            self._handle_connect_error(e, url)
 
-    async def _post(self, path: str, body: dict, user_id: int, user_rol: str) -> dict:
-        url = f"{self._base_url}{path}"
-        try:
-            response = await self._client.post(url, json=body, headers=self._headers(user_id, user_rol))
+    def _post(self, path: str, body: dict, user_id: int, user_rol: str) -> dict:
+        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+            response = client.post(
+                f"{self._base_url}{path}",
+                json=body,
+                headers=self._headers(user_id, user_rol),
+            )
             return response.json()
-        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-            self._handle_connect_error(e, url)
 
-    async def _put(self, path: str, body: dict, user_id: int, user_rol: str) -> dict:
-        url = f"{self._base_url}{path}"
-        try:
-            response = await self._client.put(url, json=body, headers=self._headers(user_id, user_rol))
+    def _put(self, path: str, body: dict, user_id: int, user_rol: str) -> dict:
+        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+            response = client.put(
+                f"{self._base_url}{path}",
+                json=body,
+                headers=self._headers(user_id, user_rol),
+            )
             return response.json()
-        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-            self._handle_connect_error(e, url)
 
     # ── Ticket operations ────────────────────────────────────────────────────
 
-    async def create_ticket(self, payload: dict, user_id: int) -> dict:
+    def create_ticket(self, payload: dict, user_id: int) -> dict:
         # Translate Odoo FK IDs to Express string values
         express_body = {
             "tipo_requerimiento": _TYPE_MAP.get(payload.get("ticket_type_id"), "Incidente"),
@@ -147,7 +136,7 @@ class ExpressAdapter(ITicketPort):
             if payload.get("descripcion"):
                 express_body["descripcion"] += f"\n\n{payload['descripcion']}"
 
-        result = await self._post("/api/tickets", express_body, user_id, "creador")
+        result = self._post("/api/tickets", express_body, user_id, "creador")
         if result.get("id"):
             return {
                 "success": True,
@@ -156,170 +145,106 @@ class ExpressAdapter(ITicketPort):
             }
         return {"success": False, "error": result.get("error", "Unknown error")}
 
-    async def get_tickets_by_creator(self, user_id: int) -> list:
-        return await self._get("/api/tickets", {"created_by": user_id})
+    def get_tickets_by_creator(self, user_id: int) -> list:
+        return self._get("/api/tickets", {"created_by": user_id})
 
-    async def get_tickets_by_assignee(self, user_id: int) -> list:
-        return await self._get("/api/tickets", {"asignado_a": user_id})
+    def get_tickets_by_assignee(self, user_id: int) -> list:
+        return self._get("/api/tickets", {"asignado_a": user_id})
 
-    async def get_ticket_detail(self, ticket_id: int, user_id: int, role: str) -> dict:
-        return await self._get(f"/api/tickets/{ticket_id}")
+    def get_ticket_detail(self, ticket_id: int, user_id: int, role: str) -> dict:
+        return self._get(f"/api/tickets/{ticket_id}")
 
-    async def resolve_ticket(self, ticket_id: int, motivo_resolucion: str,
+    def resolve_ticket(self, ticket_id: int, motivo_resolucion: str,
                        causa_raiz: str, user_id: int) -> dict:
-        # ── GAP 1 parity: validate minimum content ──────────────────────────
-        import re as _re
-
-        def _strip(text):
-            if not text:
-                return ""
-            return " ".join(_re.sub(r"<[^>]+>", "", str(text)).split())
-
-        plain_causa = _strip(causa_raiz)
-        plain_motivo = _strip(motivo_resolucion)
-
-        if len(plain_causa) < 10:
-            raise ValueError(
-                f"La Causa Raíz debe tener al menos 10 caracteres reales "
-                f"(sin contar etiquetas HTML). "
-                f"Texto actual: {len(plain_causa)} caracter(es)."
-            )
-        if len(plain_motivo) < 10:
-            raise ValueError(
-                f"El Motivo de Resolución debe tener al menos 10 caracteres reales "
-                f"(sin contar etiquetas HTML). "
-                f"Texto actual: {len(plain_motivo)} caracter(es)."
-            )
-
+        # Express uses "resolucion"; we store the full text combining both fields
         resolution_text = motivo_resolucion
         if causa_raiz:
             resolution_text += f"\n\nRoot cause: {causa_raiz}"
-        result = await self._put(
+        return self._put(
             f"/api/tickets/{ticket_id}/resolve",
             {"resolucion": resolution_text},
             user_id,
             "resueltor",
         )
-        if result.get("id"):
-            return {"success": True, "ticket_id": result["id"], "ticket_name": result.get("name")}
-        return {"success": False, "error": result.get("detail", "Unknown error")}
 
-    async def update_ticket(self, ticket_id: int, fields: dict, user_id: int) -> dict:
-        return await self._put(f"/api/tickets/{ticket_id}", fields, user_id, "creador")
+    def update_ticket(self, ticket_id: int, fields: dict, user_id: int) -> dict:
+        return self._put(f"/api/tickets/{ticket_id}", fields, user_id, "creador")
 
-    async def get_all_tickets(self, filters: dict = None, limit: int = 15, offset: int = 0) -> list:
-        return await self._get("/api/tickets", {**(filters or {}), "limit": limit, "skip": offset})
+    def get_all_tickets(self, filters: dict = None) -> list:
+        return self._get("/api/tickets", filters or {})
 
-    async def assign_ticket(self, ticket_id: int, assignee_id: int,
+    def assign_ticket(self, ticket_id: int, assignee_id: int,
                       agent_group_id: int, user_id: int) -> dict:
-        return await self._put(
+        return self._put(
             f"/api/tickets/{ticket_id}/assign",
             {"asignado_a": assignee_id},
             user_id,
             "supervisor",
         )
 
-    async def reopen_ticket(self, ticket_id: int, reason: str, user_id: int) -> dict:
-        return await self._put(
+    def reopen_ticket(self, ticket_id: int, reason: str, user_id: int) -> dict:
+        return self._put(
             f"/api/tickets/{ticket_id}/reopen",
             {"motivo": reason},
             user_id,
             "supervisor",
         )
 
-    async def approve_ticket(self, ticket_id: int, user_id: int) -> dict:
-        """
-        FASE 2: Uses mock approval lines like OdooAdapter production flow.
-        Updates the pending line for this user in get_approval_lines() mock.
-        Falls back to legacy direct write if no line found.
-        """
-        # Simulate searching for pending approval line
-        lines = self.get_approval_lines(ticket_id)
-        pending = next(
-            (l for l in lines if l["approver_id"] == user_id and l["status"] == "pending"),
-            None,
-        )
-        if pending:
-            # Update the mock line (in real Odoo this writes to helpdesk.ticket.approval)
-            return await self._put(
-                f"/api/tickets/{ticket_id}",
-                {"approval_status": "approved", "approver_id": user_id},
-                user_id,
-                "supervisor",
-            )
-        # Fallback: legacy direct write
-        return await self._put(
+    def approve_ticket(self, ticket_id: int, user_id: int) -> dict:
+        return self._put(
             f"/api/tickets/{ticket_id}",
             {"approval_status": "approved"},
             user_id,
             "supervisor",
         )
 
-    async def reject_ticket(self, ticket_id: int, reason: str, user_id: int) -> dict:
-        """
-        FASE 2: Uses mock approval lines like OdooAdapter production flow.
-        Updates the pending line for this user in get_approval_lines() mock.
-        Falls back to legacy direct write if no line found.
-        """
-        # Simulate searching for pending approval line
-        lines = self.get_approval_lines(ticket_id)
-        pending = next(
-            (l for l in lines if l["approver_id"] == user_id and l["status"] == "pending"),
-            None,
-        )
-        if pending:
-            return await self._put(
-                f"/api/tickets/{ticket_id}",
-                {"approval_status": "rejected", "rejection_reason": reason, "approver_id": user_id},
-                user_id,
-                "supervisor",
-            )
-        # Fallback: legacy direct write
-        return await self._put(
+    def reject_ticket(self, ticket_id: int, reason: str, user_id: int) -> dict:
+        return self._put(
             f"/api/tickets/{ticket_id}",
             {"approval_status": "rejected", "rejection_reason": reason},
             user_id,
             "supervisor",
         )
 
-    async def delete_ticket(self, ticket_id: int, user_id: int) -> dict:
+    def delete_ticket(self, ticket_id: int, user_id: int) -> dict:
         # SECURITY: This method is implemented but delete_ticket tool is excluded
         # from all role tool lists. See tools/ticket_tools.py for the exclusion comment.
-        response = await self._client.delete(
-            f"{self._base_url}/api/tickets/{ticket_id}",
-            headers=self._headers(user_id, "supervisor"),
-        )
-        return response.json()
+        with httpx.Client(timeout=30.0) as client:
+            response = client.delete(
+                f"{self._base_url}/api/tickets/{ticket_id}",
+                headers=self._headers(user_id, "supervisor"),
+            )
+            return response.json()
 
     # ── Catalog queries ──────────────────────────────────────────────────────
     # Return hardcoded dev catalogs. HttpAdapter will fetch these from Odoo API.
 
-    async def get_resolvers(self) -> list:
-        return await self._get("/api/users", {"rol": "resueltor"})
+    def get_resolvers(self) -> list:
+        return self._get("/api/users", {"rol": "resueltor"})
 
-    async def get_agent_groups(self) -> list:
+    def get_agent_groups(self) -> list:
         return [{"id": 1, "name": "Soporte N1"}, {"id": 2, "name": "Soporte N2"}]
 
-    async def get_ticket_types(self) -> list:
+    def get_ticket_types(self) -> list:
         return DEV_TICKET_TYPES
 
-    async def get_categories(self, parent_id: int = None) -> list:
+    def get_categories(self, parent_id: int = None) -> list:
         return [c for c in DEV_CATEGORIES if c["parent_id"] == parent_id]
 
-    async def get_urgency_levels(self) -> list:
+    def get_urgency_levels(self) -> list:
         return DEV_URGENCY
 
-    async def get_impact_levels(self) -> list:
+    def get_impact_levels(self) -> list:
         return DEV_IMPACT
 
-    async def get_priority_levels(self) -> list:
+    def get_priority_levels(self) -> list:
         return DEV_PRIORITY
 
-    async def get_stages(self) -> list:
+    def get_stages(self) -> list:
         return DEV_STAGES
 
-    async def get_resolved_tickets(self) -> list:
-        tickets = await self._get("/api/tickets", {"estado": "resuelto"})
+    def get_resolved_tickets(self) -> list:
+        tickets = self._get("/api/tickets", {"estado": "resuelto"})
         result = []
         for t in tickets:
             result.append({
@@ -331,64 +256,3 @@ class ExpressAdapter(ITicketPort):
                 "motivo_resolucion": t.get("resolucion", ""),
             })
         return result
-
-    # ── FASE 2: Approval lines ─────────────────────────────────────────────
-
-    async def get_approval_lines(self, ticket_id: int) -> list:
-        """Mock approval lines for dev environment (FASE 2 parity)."""
-        return [
-            {
-                "id": 1, "approver_id": 3, "approver_name": "Supervisor Dev",
-                "role": "TI", "status": "pending",
-                "approval_date": None, "comment": "",
-            }
-        ]
-
-    # ── FASE 3: Origins catalog ────────────────────────────────────────────
-
-    async def get_origins(self) -> list:
-        """Mock origins catalog for dev environment."""
-        return [
-            {"id": 1, "name": "Email", "description": "Reportado por correo electrónico"},
-            {"id": 2, "name": "Teléfono", "description": "Reportado por llamada telefónica"},
-            {"id": 3, "name": "Web", "description": "Reportado vía portal web"},
-            {"id": 4, "name": "Presencial", "description": "Reportado en persona"},
-            {"id": 5, "name": "Bot SARA", "description": "Creado por el agente virtual SARA"},
-        ]
-
-    # ── FASE 4: Audit log ─────────────────────────────────────────────────
-
-    async def get_ticket_logs(self, ticket_id: int, limit: int = 50) -> list:
-        """Fetches ticket history from Express backend (stage changes + notes)."""
-        return await self._get(f"/api/tickets/{ticket_id}/history")
-
-    # ── FASE 4: Knowledge base ─────────────────────────────────────────────
-
-    async def get_knowledge_articles(self, query: str, limit: int = 10) -> list:
-        """Mock knowledge base search. Falls back to RAG for actual results."""
-        return [
-            {"id": 1, "name": f"Artículo sobre {query}", "category": "Hardware", "keywords": query},
-        ]
-
-    async def get_all_knowledge_articles(self) -> list:
-        """Returns all knowledge articles for RAG seeding (dev: mock empty)."""
-        return [
-            {"id": 1, "name": "Guía de cambio de contraseña", "body": "Pasos para cambiar contraseña...", "category": "Sistemas", "keywords": "contraseña, password, login"},
-            {"id": 2, "name": "Procedimiento reinicio VPN", "body": "Reiniciar el cliente VPN...", "category": "Redes", "keywords": "vpn, conexión, túnel"},
-        ]
-
-    # ── Internal notes ──────────────────────────────────────────────────────
-
-    async def add_note(self, ticket_id: int, note: str, user_id: int) -> dict:
-        """Adds an internal note to a ticket via Express backend."""
-        result = await self._post(
-            f"/api/tickets/{ticket_id}/notes",
-            {"content": note, "user_id": user_id},
-            user_id,
-            "resueltor",
-        )
-        return {
-            "success": True,
-            "message_id": result.get("id", 0),
-            "ticket_id": ticket_id,
-        }

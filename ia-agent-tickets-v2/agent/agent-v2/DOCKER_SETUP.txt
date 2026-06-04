@@ -1,0 +1,239 @@
+================================================================================
+  IA HELPDESK AGENT v2 — DOCKER SETUP
+  Proyecto: ia-agent-tickets-v2/agent/agent-v2/
+================================================================================
+
+ARQUITECTURA DEL STACK
+─────────────────────────────────────────────────────────────────────────────
+  Docker Compose levanta DOS servicios:
+
+    postgres  →  pgvector/pgvector:pg17
+                 Puerto 5433 (host) → 5432 (contenedor)
+                 Base de datos: helpdesk_checkpoints
+                 Usuario: helpdesk_agent / helpdesk2024
+                 Extensión pgvector habilitada via docker/init.sql
+
+    agent     →  helpdesk-agent:latest (imagen local)
+                 Puerto 8001
+                 Conecta a postgres via DNS interno ("postgres:5432")
+                 Depende de que postgres esté healthy (depends_on: condition: healthy)
+
+  Dos modos de operación:
+    - Producción: imagen construida, código inmutable (docker-up.sh)
+    - Desarrollo:  bind mount del código fuente + hot reload (docker-up-dev.sh)
+
+
+================================================================================
+  PREREQUISITOS (Linux nativo — entorno primario)
+================================================================================
+
+  1. Docker Engine instalado y corriendo:
+       sudo apt-get update
+       sudo apt-get install -y docker.io docker-compose-plugin
+       sudo systemctl enable --now docker
+
+  2. Agregar tu usuario al grupo docker (evita usar sudo en cada comando):
+       sudo usermod -aG docker $USER
+       newgrp docker          # aplica en la sesión actual sin cerrar terminal
+       docker ps              # verificar que funciona sin sudo
+
+  3. Rellenar env.docker con las credenciales reales:
+       AI_GATEWAY_API_KEY=<tu-key-de-vercel>
+       AGENT_API_KEY=<clave-segura>
+
+
+================================================================================
+  MODO DESARROLLO — hot reload (entorno primario)
+================================================================================
+
+  Inicia postgres + agente con recarga automática al guardar cualquier .py:
+
+    bash docker-up-dev.sh
+
+  El script:
+    1. Detecta el IP del host (para host.docker.internal)
+    2. Inicia Docker si no está corriendo
+    3. Levanta postgres y espera que esté healthy
+    4. Arranca el agente en foreground (Ctrl+C para detener)
+
+  Cómo funciona el hot reload:
+    - El directorio del proyecto se monta en /app (cambios en código son inmediatos)
+    - agent_venv_dev: volumen nombrado — binarios del venv compilados en Linux
+    - hf_cache_dev: volumen nombrado — modelos HuggingFace (descarga en primer run)
+    - uvicorn --reload detecta cambios en archivos .py (~2s de delay)
+
+  PRIMER RUN: el modelo all-MiniLM-L6-v2 (~90MB) se descarga al volumen hf_cache_dev.
+  Puede tardar 1-2 minutos. Los runs siguientes arrancan en <5s.
+
+  Detener solo el agente (Ctrl+C) — postgres sigue corriendo.
+  Detener todo:
+    docker compose -f docker-compose.yml -f docker-compose.dev.yml down
+
+  Nueva dependencia en pyproject.toml (sin rebuild):
+    docker compose -f docker-compose.yml -f docker-compose.dev.yml restart agent
+
+
+LOGS ESPERADOS (primer arranque dev)
+─────────────────────────────────────────────────────────────────────────────
+  [dev] Host IP: 172.17.0.1
+  [dev] Postgres ready.
+  [dev] Starting agent with hot reload on port 8001...
+  ...
+  agent | [startup] Building ticket port (express)...
+  agent | [startup] Building RAG store...
+  agent | [RAG] Seeded N resolved tickets...   (o "already has N documents")
+  agent | [startup] Initializing checkpointer...
+  agent | [startup] Injecting ports into tools...
+  agent | [startup] Agent v2 ready on port 8001
+  agent | INFO: Uvicorn running on http://0.0.0.0:8001 (Press CTRL+C to quit)
+
+
+================================================================================
+  MODO PRODUCCIÓN — imagen construida
+================================================================================
+
+  Construye la imagen y levanta el stack completo:
+
+    bash docker-up.sh
+
+  Rebuild solo si cambió código o dependencias:
+    docker compose build agent
+    docker compose up -d agent
+
+  Ver logs en tiempo real:
+    docker compose logs -f
+
+  Detener:
+    docker compose down
+
+  NOTA: el primer build puede tardar 3-5 minutos (descarga imagen base + dependencias).
+  Los rebuilds siguientes usan cache y tardan ~30s.
+
+
+================================================================================
+  COMANDOS ÚTILES
+================================================================================
+
+  # Estado del stack
+  docker compose ps
+  docker compose logs -f [postgres|agent]
+
+  # Acceder a la BD desde psql / DBeaver:
+  psql -h localhost -p 5433 -U helpdesk_agent -d helpdesk_checkpoints
+  # (puerto 5433 para no colisionar con postgres local si está instalado en 5432)
+
+  # Health check del agente:
+  curl http://localhost:8001/health
+
+  # Chat de prueba:
+  curl -X POST http://localhost:8001/agent/chat \
+    -H "Content-Type: application/json" \
+    -H "X-Agent-Key: dev-key-change-in-prod" \
+    -d '{"user_id":1,"user_rol":"creador","message":"Quiero reportar un problema","thread_id":"test-001"}'
+
+  # Streaming SSE:
+  curl -N -X POST http://localhost:8001/agent/stream \
+    -H "Content-Type: application/json" \
+    -H "X-Agent-Key: dev-key-change-in-prod" \
+    -d '{"user_id":1,"user_rol":"creador","message":"Hola","thread_id":"test-001"}'
+
+  # Roles válidos: creador | resueltor | supervisor
+
+  # Eliminar volúmenes (reset completo — borra BD y modelos cacheados):
+  docker compose down -v
+
+  # Eliminar solo los volúmenes de dev:
+  docker volume rm agent-v2_agent_venv_dev agent-v2_hf_cache_dev
+
+
+================================================================================
+  BACKEND EXPRESS (adaptador de desarrollo)
+================================================================================
+
+  El agente usa el backend FastAPI+SQLite local en puerto 8000 como fuente de datos.
+  Debe estar corriendo antes de iniciar el agente.
+
+  Desde un terminal separado:
+    cd ia-agent-tickets-v2/backend
+    python -m venv venv && source venv/bin/activate
+    pip install -r requirements.txt
+    python populate_db.py    # solo primera vez, siembra tickets de prueba
+    uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  Verificar: curl http://localhost:8000/docs
+
+
+================================================================================
+  TROUBLESHOOTING
+================================================================================
+
+  "permission denied while trying to connect to the Docker daemon":
+    → Usuario no está en el grupo docker.
+    Solución: sudo usermod -aG docker $USER && newgrp docker
+
+  "connection refused" al agente (puerto 8001):
+    → Verificar que el contenedor está corriendo: docker compose ps
+    → Ver logs: docker compose logs agent --tail=50
+
+  Agente en crash loop (Status: Restarting):
+    → Ver logs: docker compose logs agent --tail=50
+    Causas comunes:
+      - Postgres no saludable aún: esperar o revisar docker compose logs postgres
+      - Backend Express no accesible: verificar que corre en puerto 8000
+      - Variables faltantes en env.docker (AI_GATEWAY_API_KEY, etc.)
+
+  "no such service: agent" al usar docker-compose.dev.yml:
+    → El servicio se llama "agent" en docker-compose.yml pero tiene alias "agent" en el override.
+    → Verificar: docker compose -f docker-compose.yml -f docker-compose.dev.yml config
+
+  Modelo HuggingFace no descarga (timeout en primer run):
+    → Verificar conectividad: curl -I https://huggingface.co
+    → Si fallas de red son frecuentes, considerar pre-descargar:
+         docker run --rm -v agent-v2_hf_cache_dev:/root/.cache/huggingface \
+           python:3.11-slim bash -c \
+           "pip install sentence-transformers && python -c \"from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')\""
+
+  postgres no arranca (error de permisos en volumen):
+    → docker compose down -v && docker compose up -d postgres
+    ATENCIÓN: -v borra los datos del volumen
+
+
+================================================================================
+  APÉNDICE — WSL2 en Windows (entorno secundario)
+================================================================================
+
+  En Windows con WSL2 Ubuntu, los scripts funcionan pero hay fricción adicional:
+
+  DIFERENCIAS vs Linux nativo:
+    - host-gateway en docker-compose.yml resuelve al bridge Docker (172.17.0.1), NO al host Windows.
+      Los scripts docker-up*.sh detectan y exportan DOCKER_HOST_IP automáticamente.
+    - Si el usuario WSL2 no tiene permisos Docker: sudo usermod -aG docker $USER && newgrp docker
+    - Puertos Docker no se forwardean automáticamente a Windows.
+      El script docker-up-dev.sh configura el portproxy si se ejecuta con permisos.
+
+  EJECUTAR DESDE POWERSHELL (Windows):
+    wsl -d Ubuntu -- bash /ruta/al/proyecto/docker-up-dev.sh
+    wsl -d Ubuntu -- bash /ruta/al/proyecto/docker-up.sh
+
+  EJECUTAR DESDE WSL2 DIRECTAMENTE:
+    cd /mnt/c/Users/<usuario>/.../ agent-v2
+    bash docker-up-dev.sh
+
+  NOTA Windows IoT Enterprise LTSC:
+    Docker Desktop NO funciona (falla con exit -5).
+    Solución única: Docker Engine dentro de WSL2.
+    Ver guía de instalación en la sección INSTALACIÓN DOCKER ENGINE (WSL2).
+
+  INSTALACIÓN DOCKER ENGINE EN WSL2 (primera vez):
+    wsl -d Ubuntu -u root -- bash -c "
+      install -m 0755 -d /etc/apt/keyrings
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+      chmod a+r /etc/apt/keyrings/docker.gpg
+      ARCH=\$(dpkg --print-architecture)
+      CODENAME=\$(lsb_release -cs)
+      echo \"deb [arch=\${ARCH} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \${CODENAME} stable\" > /etc/apt/sources.list.d/docker.list
+      apt-get update -qq
+      apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    "
+
+================================================================================

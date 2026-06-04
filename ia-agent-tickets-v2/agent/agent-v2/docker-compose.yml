@@ -1,0 +1,56 @@
+services:
+
+  # ── PostgreSQL 17 + pgvector ────────────────────────────────────────────────
+  # Self-contained: replaces the host PostgreSQL for Docker deployments.
+  # The agent service depends on this being healthy before starting.
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: helpdesk-postgres
+    environment:
+      POSTGRES_USER: helpdesk_agent
+      POSTGRES_PASSWORD: helpdesk2024
+      POSTGRES_DB: helpdesk_checkpoints
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/01_extensions.sql:ro
+    ports:
+      # 5433 en el host para no colisionar con el PostgreSQL 18 local (que usa 5432).
+      # Útil para dev: conectar con DBeaver/psql a localhost:5433
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U helpdesk_agent -d helpdesk_checkpoints"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ── IA Helpdesk Agent v2 ────────────────────────────────────────────────────
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: helpdesk-agent:latest
+    container_name: helpdesk-agent-v2
+    ports:
+      - "8001:8001"
+    env_file:
+      - env.docker
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    extra_hosts:
+      # Linux nativo: host-gateway resuelve al host directamente (funciona sin config extra).
+      # WSL2: host-gateway resuelve al bridge Docker (172.17.0.1), NO al host Windows.
+      #        Los scripts docker-up*.sh detectan el IP real y exportan DOCKER_HOST_IP.
+      - "host.docker.internal:${DOCKER_HOST_IP:-host-gateway}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+volumes:
+  postgres_data:
+  agent_data:

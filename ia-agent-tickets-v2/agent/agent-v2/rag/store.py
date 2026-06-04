@@ -14,14 +14,13 @@ Tables created by langchain_postgres (auto on first use):
   langchain_pg_embedding   — vectors + metadata (JSONB)
 """
 
-import asyncio
 import html
 import re
 import logging
 from langchain_postgres import PGVector
 from langchain_core.documents import Document
 
-from ports.rag_port import IRAGPort, SuggestionResult, SolutionItem, BoostResult
+from ports.rag_port import IRAGPort, SuggestionResult, SolutionItem
 from rag.embeddings import get_embeddings
 from config.settings import settings
 
@@ -52,14 +51,10 @@ def _pg_dsn(dsn: str) -> str:
 class PGVectorRAGStore(IRAGPort):
 
     COLLECTION_NAME = "resolved_tickets"
-    # Boost multiplier per positive feedback — capped at 50% max boost
-    _BOOST_FACTOR = 0.1
-    _BOOST_CAP = 5  # max effective boosts (50% boost at cap)
 
     def __init__(self, postgres_dsn: str, enabled: bool = True):
         self._enabled = enabled
         self._store: PGVector | None = None
-        self._boosts: dict[int, int] = {}  # ticket_id → boost_count
 
         if enabled:
             self._store = PGVector(
@@ -70,8 +65,8 @@ class PGVectorRAGStore(IRAGPort):
                 create_extension=True,
             )
 
-    async def search_similar(self, query: str, category: str = None,
-                             k: int = 5) -> SuggestionResult:
+    def search_similar(self, query: str, category: str = None,
+                       k: int = 5) -> SuggestionResult:
         if not self._enabled or not self._store:
             return SuggestionResult(solutions_found=False)
 
@@ -79,11 +74,12 @@ class PGVectorRAGStore(IRAGPort):
         if category:
             full_query = f"Category: {category}. {full_query}"
 
-        # Fetch k*2 results and re-rank with boosts to surface confirmed-useful docs
-        fetch_k = k * 2
         try:
-            results = await asyncio.to_thread(
-                self._store.similarity_search_with_relevance_scores, full_query, k=fetch_k)
+            # similarity_search_with_relevance_scores returns (doc, score) where
+            # score is in [0, 1] (higher = more similar). With COSINE strategy,
+            # score = 1 - pgvector_cosine_distance, so range and threshold are
+            # identical to the old Chroma conversion (1 - dist/2).
+            results = self._store.similarity_search_with_relevance_scores(full_query, k=k)
         except Exception as exc:
             _log.warning("pgvector search failed: %s", exc)
             return SuggestionResult(solutions_found=False)
@@ -92,44 +88,36 @@ class PGVectorRAGStore(IRAGPort):
             return SuggestionResult(solutions_found=False)
 
         threshold = settings.rag_similarity_threshold
-        scored = []
+        solutions = []
+        highest_score = 0.0
 
         for doc, score in results:
             if score < threshold:
                 continue
+            if score > highest_score:
+                highest_score = score
             meta = doc.metadata
-            tid = meta.get("ticket_id", 0)
-            # Apply boost: each positive feedback adds _BOOST_FACTOR, capped at _BOOST_CAP
-            boost = min(self._boosts.get(tid, 0), self._BOOST_CAP)
-            adjusted = score * (1 + self._BOOST_FACTOR * boost)
-            scored.append((adjusted, SolutionItem(
+            solutions.append(SolutionItem(
                 ticket_name=meta.get("ticket_name", ""),
-                ticket_id=tid,
+                ticket_id=meta.get("ticket_id", 0),
                 category=meta.get("category", ""),
                 ticket_type=meta.get("ticket_type", ""),
                 description=meta.get("description", ""),
                 motivo_resolucion=meta.get("motivo_resolucion", ""),
                 causa_raiz=meta.get("causa_raiz", ""),
                 score=round(score, 3),
-                source=meta.get("source", "ticket"),  # 'ticket' or 'knowledge'
-            )))
-
-        # Re-rank by adjusted score, return top k
-        scored.sort(key=lambda x: -x[0])
-        top = scored[:k]
-        solutions = [s for _, s in top]
-        highest = max((s[0] for s in scored), default=0.0)
+            ))
 
         return SuggestionResult(
             solutions_found=len(solutions) > 0,
             solutions=solutions,
-            confidence=round(min(highest, 1.0), 3),
+            confidence=round(highest_score, 3),
         )
 
-    async def add_resolved_ticket(self, ticket_id: int, ticket_name: str,
-                                   ticket_type: str, category: str,
-                                   description: str, motivo_resolucion: str,
-                                   causa_raiz: str = "") -> bool:
+    def add_resolved_ticket(self, ticket_id: int, ticket_name: str,
+                            ticket_type: str, category: str,
+                            description: str, motivo_resolucion: str,
+                            causa_raiz: str = "") -> bool:
         if not self._enabled or not self._store:
             return False
 
@@ -162,18 +150,17 @@ class PGVectorRAGStore(IRAGPort):
         try:
             # Stable ID per ticket_id: PGVector upserts on ID collision,
             # so re-resolved tickets automatically replace their old embedding.
-            await asyncio.to_thread(
-                self._store.add_documents, [doc], ids=[f"ticket-{ticket_id}"])
+            self._store.add_documents([doc], ids=[f"ticket-{ticket_id}"])
         except Exception as exc:
             _log.warning("pgvector add_resolved_ticket failed: %s", exc)
             return False
         return True
 
-    async def initialize_from_resolved_tickets(self, tickets: list) -> int:
+    def initialize_from_resolved_tickets(self, tickets: list) -> int:
         if not self._enabled or not self._store:
             return 0
 
-        if await self.count() > 0:
+        if self.count() > 0:
             return 0  # Already seeded — skip
 
         documents = []
@@ -212,109 +199,27 @@ class PGVectorRAGStore(IRAGPort):
 
         if documents:
             try:
-                await asyncio.to_thread(
-                    self._store.add_documents, documents, ids=ids)
+                self._store.add_documents(documents, ids=ids)
             except Exception as exc:
                 _log.warning("pgvector seed failed: %s", exc)
                 return 0
 
         return len(documents)
 
-    async def seed_knowledge_articles(self, articles: list) -> int:
-        """
-        Add knowledge base articles to the same vector collection.
-        
-        Articles are stored alongside resolved tickets in the same collection
-        with metadata source='knowledge' so search_similar finds both.
-        
-        Stable IDs use 'kb-{id}' prefix to avoid collision with 'ticket-{id}'.
-        """
-        if not self._enabled or not self._store:
-            return 0
-
-        documents = []
-        ids = []
-
-        for article in articles:
-            name = article.get("name", "")
-            body = article.get("body", "")
-            if not body and not name:
-                continue
-
-            clean_body = _strip_html(body or "")
-            keywords = article.get("keywords", "")
-            category = article.get("category", "")
-
-            document_text = (
-                f"Knowledge Article: {name}. "
-                f"Category: {category}. "
-                f"Keywords: {keywords}. "
-                f"Content: {clean_body}"
-            )
-
-            documents.append(Document(
-                page_content=document_text,
-                metadata={
-                    "source":      "knowledge",
-                    "article_id":  article.get("id", 0),
-                    "name":        name,
-                    "category":    category,
-                    "keywords":    keywords,
-                    "body":        clean_body,
-                    "ticket_id":   0,        # not a ticket
-                    "ticket_name": f"KB-{article.get('id', 0)}",
-                    "ticket_type": "Knowledge",
-                },
-            ))
-            ids.append(f"kb-{article.get('id', 0)}")
-
-        if documents:
-            try:
-                await asyncio.to_thread(
-                    self._store.add_documents, documents, ids=ids)
-                _log.info("Seeded %d knowledge base articles into pgvector", len(documents))
-            except Exception as exc:
-                _log.warning("pgvector knowledge seed failed: %s", exc)
-                return 0
-
-        return len(documents)
-
-    async def count(self) -> int:
+    def count(self) -> int:
         """Returns document count via direct SQL. Only used for startup logging."""
         if not self._enabled or not self._store:
             return 0
         try:
             import psycopg
-            conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
-            try:
-                row = await conn.execute(
+            with psycopg.connect(settings.postgres_dsn) as conn:
+                row = conn.execute(
                     "SELECT COUNT(*) FROM langchain_pg_embedding e "
                     "JOIN langchain_pg_collection c ON e.collection_id = c.uuid "
                     "WHERE c.name = %s",
                     (self.COLLECTION_NAME,),
-                )
-                result = await row.fetchone()
-            finally:
-                await conn.close()
-            return result[0] if result else 0
+                ).fetchone()
+            return row[0] if row else 0
         except Exception as exc:
             _log.debug("pgvector count failed: %s", exc)
             return 0
-
-    async def boost_document(self, ticket_id: int) -> BoostResult:
-        """
-        Increment the boost counter for a document confirmed useful by a user.
-        
-        Boosts affect future search_similar() rankings by multiplying the
-        cosine similarity score (10% per boost, capped at 50%).
-        """
-        if not self._enabled:
-            return BoostResult(success=False, ticket_id=ticket_id,
-                              message="RAG disabled")
-        current = self._boosts.get(ticket_id, 0) + 1
-        self._boosts[ticket_id] = current
-        _log.info("RAG boost: ticket %s → boost_count=%s (multiplier=%.2f)",
-                  ticket_id, current, 1 + self._BOOST_FACTOR * min(current, self._BOOST_CAP))
-        return BoostResult(success=True, ticket_id=ticket_id,
-                          boost_count=current,
-                          message=f"Boosted to {current}")

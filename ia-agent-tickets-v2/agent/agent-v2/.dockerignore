@@ -1,0 +1,17 @@
+.env
+.env.*
+*.db
+*.db-shm
+*.db-wal
+vector_store/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+*.md
+agent_v2_Doc/
+tests/
+*.log
+.venv/

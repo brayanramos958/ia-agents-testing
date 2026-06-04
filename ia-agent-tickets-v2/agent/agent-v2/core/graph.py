@@ -19,7 +19,6 @@ Supported checkpoint backends:
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
 from config.settings import settings
-from core.circuit_breaker import retry_with_backoff, get_provider_status, CircuitOpenError, RateLimitError
 
 # Module-level holder — set once during lifespan startup
 _checkpointer_instance = None
@@ -32,56 +31,15 @@ def _build_vercel_llm():
             "Get your key at https://vercel.com/dashboard → AI Gateway."
         )
 
-    from openai import RateLimitError as OpenAIRateLimitError, APIStatusError as OpenAIAPIStatusError
-
-    primary = ChatOpenAI(
+    llm = ChatOpenAI(
         api_key=settings.ai_gateway_api_key,
         base_url=settings.ai_gateway_base_url,
         model=settings.ai_gateway_model,
         temperature=0.1,
-        timeout=settings.llm_timeout,
+        timeout=60,
     )
-    # Register provider status for circuit breaker
-    get_provider_status(settings.ai_gateway_model)
-    print(f"[LLM] Vercel AI Gateway: {settings.ai_gateway_model} @ {settings.ai_gateway_base_url} (timeout={settings.llm_timeout}s)")
-
-    # Fallback chain: Groq → OpenRouter (si están configurados)
-    fallbacks = []
-
-    if settings.groq_api_key:
-        from langchain_groq import ChatGroq
-        groq_llm = ChatGroq(
-            api_key=settings.groq_api_key,
-            model=settings.llm_model,
-            temperature=0.1,
-        )
-        get_provider_status(f"groq/{settings.llm_model}")
-        fallbacks.append(groq_llm)
-        print(f"[LLM] Fallback 1: Groq {settings.llm_model}")
-
-    if settings.openrouter_api_key:
-        for model in settings.openrouter_fallback_models:
-            fallbacks.append(ChatOpenAI(
-                api_key=settings.openrouter_api_key,
-                base_url="https://openrouter.ai/api/v1",
-                model=model,
-                temperature=0.1,
-                timeout=60,
-            ))
-        print(f"[LLM] Fallback 2+: OpenRouter {settings.openrouter_fallback_models}")
-
-    if not fallbacks:
-        return primary
-
-    from groq import RateLimitError as GroqRateLimitError
-    return primary.with_fallbacks(
-        fallbacks,
-        exceptions_to_handle=(
-            GroqRateLimitError,
-            OpenAIRateLimitError,
-            OpenAIAPIStatusError,
-        ),
-    )
+    print(f"[LLM] Vercel AI Gateway: {settings.ai_gateway_model} @ {settings.ai_gateway_base_url}")
+    return llm
 
 
 def _build_ollama_llm():
@@ -94,26 +52,6 @@ def _build_ollama_llm():
         think=False,   # disable Qwen3 chain-of-thought — reduces tokens and prevents crashes
     )
     print(f"[LLM] Ollama: {settings.ollama_model} @ {settings.ollama_base_url} (ctx=8192, think=off)")
-    return llm
-
-
-def _build_anthropic_llm():
-    """Builds ChatAnthropic for Anthropic's Claude API."""
-    if not settings.anthropic_api_key:
-        raise RuntimeError(
-            "LLM_PROVIDER=anthropic requires ANTHROPIC_API_KEY to be set in env.docker.\n"
-            "Get your key at https://console.anthropic.com/"
-        )
-    from langchain_anthropic import ChatAnthropic
-
-    llm = ChatAnthropic(
-        api_key=settings.anthropic_api_key,
-        model=settings.anthropic_model,
-        temperature=0.1,
-        timeout=60,
-        max_tokens=4096,  # suficiente para respuestas de helpdesk
-    )
-    print(f"[LLM] Anthropic: {settings.anthropic_model}")
     return llm
 
 
@@ -177,48 +115,7 @@ def build_llm():
         return _build_vercel_llm()
     if settings.llm_provider == "ollama":
         return _build_ollama_llm()
-    if settings.llm_provider == "anthropic":
-        return _build_anthropic_llm()
     return _build_groq_llm()
-
-
-# ── Security classifier (Cap 2) ─────────────────────────────────────────────
-# Lightweight model that runs BEFORE the main LLM to detect prompt injection,
-# jailbreak attempts, and role impersonation. Uses the same Vercel Gateway API key
-# but a much cheaper model (~$0.00015/request). Cached by thread_id.
-
-_security_llm = None
-
-
-def build_security_classifier():
-    """
-    Returns a ChatOpenAI instance wired to the Vercel AI Gateway with the
-    cheap security classifier model.
-
-    Only built when security_classifier_enabled=True and llm_provider=vercel.
-    For other providers (groq, ollama), security classification is skipped.
-    """
-    global _security_llm
-    if _security_llm is not None:
-        return _security_llm
-
-    if not settings.security_classifier_enabled:
-        return None
-    if settings.llm_provider != "vercel":
-        return None
-    if not settings.ai_gateway_api_key:
-        return None
-
-    _security_llm = ChatOpenAI(
-        api_key=settings.ai_gateway_api_key,
-        base_url=settings.ai_gateway_base_url,
-        model=settings.security_classifier_model,
-        temperature=0,        # deterministic — same input always gives same verdict
-        max_tokens=5,         # only needs to output SAFE or UNSAFE
-        timeout=10,           # fast fail — don't block the user for security checks
-    )
-    print(f"[security] Classifier ready: {settings.security_classifier_model} @ {settings.ai_gateway_base_url}")
-    return _security_llm
 
 
 async def init_checkpointer() -> None:

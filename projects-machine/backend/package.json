@@ -1,0 +1,18 @@
+{
+  "name": "agente-aprendizaje-backend",
+  "version": "1.0.0",
+  "description": "Backend para agente de aprendizaje con memoria",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "groq-sdk": "^1.1.2",
+    "sql.js": "^1.10.3"
+  }
+}

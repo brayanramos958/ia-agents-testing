@@ -21,7 +21,6 @@ class SolutionItem:
     motivo_resolucion: str  # Resolution text (Odoo field name)
     score: float            # Similarity score 0.0–1.0 (higher = more similar)
     causa_raiz: str = ""    # Root cause (Odoo field: causa_raiz) — empty if not recorded
-    source: str = "ticket"  # Source of the solution: 'ticket' or 'knowledge'
 
 
 @dataclass
@@ -35,20 +34,11 @@ class SuggestionResult:
     confidence: float = 0.0
 
 
-@dataclass
-class BoostResult:
-    """Result of boosting a document in the knowledge base."""
-    success: bool
-    ticket_id: int
-    boost_count: int = 0
-    message: str = ""
-
-
 class IRAGPort(ABC):
 
     @abstractmethod
-    async def search_similar(self, query: str, category: str = None,
-                             k: int = 5) -> SuggestionResult:
+    def search_similar(self, query: str, category: str = None,
+                       k: int = 5) -> SuggestionResult:
         """
         Search for resolved tickets similar to the given query.
 
@@ -62,7 +52,7 @@ class IRAGPort(ABC):
         """
 
     @abstractmethod
-    async def add_resolved_ticket(self, ticket_id: int, ticket_name: str,
+    def add_resolved_ticket(self, ticket_id: int, ticket_name: str,
                             ticket_type: str, category: str,
                             description: str, motivo_resolucion: str,
                             causa_raiz: str = "") -> bool:
@@ -78,7 +68,7 @@ class IRAGPort(ABC):
         """
 
     @abstractmethod
-    async def initialize_from_resolved_tickets(self, tickets: list) -> int:
+    def initialize_from_resolved_tickets(self, tickets: list) -> int:
         """
         Seed the vector store from a list of resolved tickets.
         Called once at application startup.
@@ -91,20 +81,5 @@ class IRAGPort(ABC):
         """
 
     @abstractmethod
-    async def count(self) -> int:
+    def count(self) -> int:
         """Returns the number of documents currently in the vector store."""
-
-    @abstractmethod
-    async def boost_document(self, ticket_id: int) -> BoostResult:
-        """
-        Boost a document's relevance when a user confirms the solution was helpful.
-
-        Increments boost_count in metadata and re-inserts via upsert so
-        future searches rank this document higher.
-
-        Args:
-            ticket_id: ID of the ticket whose solution was confirmed useful
-
-        Returns:
-            BoostResult with success status and new boost_count
-        """

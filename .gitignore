@@ -1,36 +1,15 @@
-# Secretos — NUNCA subir
-.env
-*.env
-!env.docker
-!env.example
-!env.*
-
-# Python
-__pycache__/
-*.pyc
-*.pyo
-.venv*/
-venv*/
-
-# Bases de datos
-*.db
-*.db-shm
-*.db-wal
-
-# Backups
-backups/
-*.zip
-*.tar.gz
-
-# Proyectos que NO son el agente
-ia-agent-tickets-v1/
-projects-machine/
-ITS_Helpdesk_Docst_no_editable/
-
-# Vector store
-vector_store/
-
-# Logs
+.DS_Store
 *.log
-checkpoints.db*
+.env
+node_modules/
 
+ITS_Helpdesk_Docst_no_editable
+
+# LangGraph SQLite state — binary, cambia en cada run, no tiene valor en git
+checkpoints.db
+checkpoints.db-shm
+checkpoints.db-wal
+feedback.db
+
+# ChromaDB vector store — se re-siembra automáticamente al startup
+vector_store/access.txt

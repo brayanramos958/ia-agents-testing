@@ -1,0 +1,45 @@
+# Resumen de Progreso: Agente IA (Mesa de Ayuda)
+Fecha: 31 de marzo, 2026
+
+## 1. Arquitectura de 3 Servicios (Funcionando)
+- **Backend (Express:3001)**: Fuente de verdad, CRUD de tickets y usuarios.
+- **Agente IA (FastAPI:8000)**: Cerebro conversacional con LangGraph y herramientas.
+- **Frontend (Vite:5173)**: UI de gestión tradicional (Panel de control).
+
+## 2. Estado de Implementación: Fase 1 (Completada)
+Se implementó y validó el microservicio Python en `agent/`:
+
+### Componentes:
+- `main.py`: Servidor FastAPI con el endpoint `POST /agent/chat`.
+- `graph.py`: Flujo ReAct de LangGraph con el nodo LLM y nodo de herramientas automáticas.
+- `tools.py`: Herramientas (@tool) que consultan el backend Express via `httpx`. Campos como `descripcion` están integrados.
+- `prompts.py`: System Prompts dinámicos para **Creador**, **Resolutor** y **Supervisor**.
+- `InMemorySaver`: Memoria persistente por `thread_id` (basada en el ID del usuario).
+
+### Funcionalidades Corregidas:
+- **Bind Tools**: El agente ya sabe invocar funciones.
+- **Message Merging**: El historial de conversación se mantiene (`add_messages`).
+- **Contexto de Usuario**: El agente recibe `user_id` y `user_rol` para actuar según su rol.
+
+## 3. Pruebas de Funcionamiento (Validadas)
+- **Rol Creador**: El agente saluda y pide: tipo, categoría, descripción y urgencia. No crea el ticket hasta que el usuario confirma.
+- **Rol Resolutor**: Al preguntar "¿qué tengo?", el agente consulta la DB y muestra sus tickets asignados. Puede pedir detalles o resolver via chat.
+- **Backend**: Se agregó el filtro `created_by` en `GET /api/tickets` para que el creador vea sus propios tickets.
+
+## 4. Cómo probar (Backend y Agente encendidos)
+Usa `curl` desde cualquier terminal:
+
+```bash
+# Probar como Creador (User 1)
+curl -X POST http://localhost:8000/agent/chat \
+-H "Content-Type: application/json" \
+-d '{"user_id": 1, "user_rol": "creador", "message": "Hola, mi impresora no imprime"}'
+
+# Probar como Resolutor (User 2)
+curl -X POST http://localhost:8000/agent/chat \
+-H "Content-Type: application/json" \
+-d '{"user_id": 2, "user_rol": "resolutor", "message": "Dime mis tickets asignados"}'
+```
+
+## 5. Próximo Paso Sugerido: Fase 2
+Implementar el componente `AgentChat.jsx` en el frontend para que el usuario pueda tener esta conversación en una ventana de chat en lugar de usar terminales.
