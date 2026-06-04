@@ -1,0 +1,9 @@
+uv run python main.py - agente
+source .venv/bin/activate - agente
+
+bash docker-up-dev.sh
+
+source venv/bin/activate - backend - dev
+uvicorn main:app --reload --port 8000 - backend - dev
+
+recupera la sesion anterior del proyecto ia-agents-testing

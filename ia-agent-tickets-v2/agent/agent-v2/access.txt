@@ -1,0 +1,69 @@
+# ── LLM Configuration
+GROQ_API_KEY=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
+LLM_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
+OPENROUTER_API_KEY=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
+OPENROUTER_MODEL=nvidia/nemotron-3-super-120b-a12b:free
+
+# ── Backend adapter
+# express=local dev | odoo=Odoo 15 RPC | postgres=future
+
+BACKEND_ADAPTER=express
+BACKEND_URL=http://localhost:8000
+
+#BACKEND_ADAPTER=odoo
+
+# Configuración exclusiva para Odoo 15 (usa usuario y clave, NO Api_Key)
+#ODOO_BASE_URL=http://tu_dominio_o_ip_de_odoo:8069
+#ODOO_DATABASE=nombre_de_tu_base_de_datos
+#ODOO_USER=tu_correo_o_usuario_de_odoo
+#ODOO_PASSWORD=tu_contraseña_segura
+
+
+# ── RAG
+VECTOR_STORE_PATH=./vector_store
+RAG_ENABLED=false
+RAG_TOP_K=5
+RAG_SIMILARITY_THRESHOLD=0.6
+
+# ── Auth (header: X-Agent-Key)
+# Generate strong key: python -c "import secrets; print(secrets.token_hex(32))"
+AGENT_API_KEY=dev-key-change-in-prod
+
+# ── Conversation persistence (memory=dev | sqlite=prod)
+#CHECKPOINT_BACKEND=sqlite
+#CHECKPOINT_DB_PATH=./checkpoints.db
+
+# ── AI feedback (NOT ticket CSAT)
+FEEDBACK_DB_PATH=./feedback.db
+
+CHECKPOINT_BACKEND=postgres
+#POSTGRES_DSN=postgresql://helpdesk_agent:helpdesk2024@localhost:5432/helpdesk_checkpoints
+POSTGRES_DSN=postgresql://helpdesk_agent:helpdesk2024@localhost:5432/helpdesk_checkpoints
+
+# ── Server (port 8001 - v1 uses 8000)
+PORT=8002
+CORS_ORIGINS=["http://localhost:5173","http://localhost:3000"]
+
+
+
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=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
+LANGSMITH_PROJECT="ia-helpdesk-agent-v2"
+
+
+#CHECKPOINT_BACKEND=postgres                               
+#POSTGRES_DSN=postgresql://user:password@host:5432/dbname
+
+# LLM Provider — cambiar entre "groq" y "ollama" y 'vercel'
+LLM_PROVIDER=vercel
+
+#Ollama
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=qwen3:14b
+
+#AI_GATEWAY_API_KEY=vck_0x7QwYTQzN8EikcFpOw0IGwhF6TGr19yeTY3KFLXHcEkNjNIGX122Of2
+AI_GATEWAY_API_KEY=vck_5CJKjBi7mLVclkcK4B1qvEk2lV1kQ1UYeMPk4sJI04wAz8mPRp2DJ73x
+AI_GATEWAY_MODEL=xai/grok-4.1-fast-non-reasoning
+
+RATE_LIMIT_PER_MINUTE=10

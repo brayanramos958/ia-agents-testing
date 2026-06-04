@@ -1,0 +1,134 @@
+"""
+Application configuration — single source of truth.
+All values come from environment variables or .env file.
+"""
+
+from pydantic_settings import BaseSettings
+from typing import List
+
+
+class Settings(BaseSettings):
+    # ── LLM ────────────────────────────────────────────────────────────────
+    # "vercel"    → Vercel AI Gateway (default, production) — OpenAI-compatible
+    # "groq"      → Groq API
+    # "anthropic" → Anthropic Claude API (ChatAnthropic)
+    # "ollama"    → Ollama local (development)
+    llm_provider: str = "vercel"
+
+    # ── Vercel AI Gateway (only used when llm_provider=vercel) ──────────────
+    ai_gateway_api_key: str = ""
+    ai_gateway_model: str = "xiaomi/mimo-v2.5"
+    ai_gateway_base_url: str = "https://ai-gateway.vercel.sh/v1"
+    # Security classifier: cheap model for prompt injection / jailbreak detection.
+    # Runs BEFORE the main model — rejects unsafe messages without consuming main model tokens.
+    # Use the fastest/cheapest available: openai/gpt-4.1-nano, google/gemini-3.1-flash-lite
+    security_classifier_enabled: bool = True
+    security_classifier_model: str = "openai/gpt-4.1-nano"
+
+    groq_api_key: str = ""
+    llm_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
+    openrouter_api_key: str = ""
+    openrouter_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
+
+    # ── Ollama (only used when llm_provider=ollama) ─────────────────────────
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "gemma3"
+    # Modelos free de OpenRouter usados como cadena de fallback cuando Groq hace rate limit.
+    # Se intentan en orden — si uno falla con 429/402, se pasa al siguiente.
+    # Verificados en OpenRouter API (abril 2026) — todos soportan tool calling y son gratuitos.
+    openrouter_fallback_models: List[str] = [
+        "nvidia/nemotron-3-super-120b-a12b:free",   # 120B, 262K ctx
+        "google/gemma-4-31b-it:free",                # 31B,  262K ctx
+        "google/gemma-4-26b-a4b-it:free",            # 26B,  262K ctx
+        "minimax/minimax-m2.5:free",                 # 196K ctx
+        "nvidia/nemotron-3-nano-30b-a3b:free",       # 30B,  256K ctx
+    ]
+
+    # ── Anthropic (only used when llm_provider=anthropic) ────────────────────
+    # Uses langchain-anthropic ChatAnthropic.
+    # Recommended: claude-haiku-4-5 (fastest, $1/M in / $5/M out, good tool calling)
+    anthropic_api_key: str = ""
+    anthropic_model: str = "claude-haiku-4-5"
+
+    # ── Backend adapter ─────────────────────────────────────────────────────
+    # "express"  → ExpressAdapter (local dev, simplified schema — no Odoo needed)
+    # "odoo"     → OdooAdapter (production — Odoo 15 Community JSON-RPC)
+    # "http"     → HttpAdapter (legacy — deprecated, kept as reference only)
+    # "postgres" → PostgresAdapter (future — direct DB access)
+    backend_adapter: str = "express"
+    backend_url: str = "http://localhost:3001"
+
+    # OdooAdapter — Odoo 15 Community JSON-RPC (required when backend_adapter=odoo)
+    # Odoo 15 uses session auth: login + password.
+    # NOTE: API keys (Bearer token) are Odoo 17+ — do NOT use them for Odoo 15.
+    odoo_base_url: str = ""
+    odoo_database: str = ""
+    odoo_user: str = ""        # Login del usuario de servicio (e.g. helpdesk@empresa.com)
+    odoo_password: str = ""    # Contraseña del usuario de servicio
+
+    # ── RAG ─────────────────────────────────────────────────────────────────
+    # pgvector uses postgres_dsn — no separate vector_store_path needed.
+    # vector_store_path kept for backward compatibility with existing .env files.
+    vector_store_path: str = "./vector_store"
+    rag_enabled: bool = True
+    rag_top_k: int = 5
+    # Minimum confidence to present a solution before creating a ticket
+    rag_similarity_threshold: float = 0.6
+
+    # ── Rate limiting ────────────────────────────────────────────────────────
+    # Per-user sliding-window limit (requests per 60 seconds).
+    # Applied to /agent/chat and /agent/stream.
+    # For multi-worker production: set this via .env and back the counter with Redis.
+    rate_limit_per_minute: int = 10
+
+    # ── LLM concurrency ───────────────────────────────────────────────────────
+    # Maximum simultaneous LLM calls (ainvoke/astream_events).
+    # Prevents saturation of free-tier APIs under load.
+    # Groq free: 30 req/min → 20 concurrent calls with ~5-10s response = ~120 RPM max
+    # Lower this if you see 429 from the LLM provider.
+    # Multi-worker: each worker has its own semaphore. With 2 workers:
+    #   5 per worker × 2 = 10 max concurrent LLM calls.
+    llm_concurrency_limit: int = 5
+
+    # ── LLM timeout and retry ─────────────────────────────────────────────────
+    # Timeout per LLM call in seconds (reduced for demo responsiveness).
+    # Circuit breaker: if a provider fails 3 times, it's skipped for 30s.
+    llm_timeout: int = 20
+    llm_retry_max: int = 2
+    llm_retry_base_delay: float = 2.0  # seconds, doubles each retry
+
+    # ── Auth ─────────────────────────────────────────────────────────────────
+    # Header: X-Agent-Key
+    # To upgrade to OAuth2/JWT:
+    #   1. Replace api_key_middleware with FastAPI OAuth2PasswordBearer dependency
+    #   2. Business logic in routes stays unchanged
+    agent_api_key: str = "dev-key-change-in-prod"
+
+    # ── Conversation persistence ─────────────────────────────────────────────
+    # "memory"   → InMemorySaver (lost on restart, dev only)
+    # "sqlite"   → AsyncSqliteSaver (persists across restarts, single-worker dev)
+    # "postgres" → AsyncPostgresSaver (production — required for multi-user concurrency)
+    checkpoint_backend: str = "sqlite"
+    checkpoint_db_path: str = "./checkpoints.db"
+    # PostgreSQL DSN — required when checkpoint_backend=postgres
+    # Format: postgresql://user:password@host:5432/dbname
+    postgres_dsn: str = ""
+
+    # ── AI feedback (separate from ticket CSAT) ──────────────────────────────
+    # Stores ratings of the AI assistant's helpfulness — NOT ticket satisfaction.
+    # Ticket CSAT is handled natively by the enterprise system (satisfaction_rating).
+    feedback_db_path: str = "./feedback.db"
+
+    # ── Server ───────────────────────────────────────────────────────────────
+    port: int = 8002  # Port 8000 is reserved for agent-v1
+    cors_origins: List[str] = ["*"]
+
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+        # extra="ignore" allows third-party env vars (e.g. LANGCHAIN_*, HF_TOKEN)
+        # to coexist in .env without causing a ValidationError at startup.
+        extra = "ignore"
+
+
+settings = Settings()
