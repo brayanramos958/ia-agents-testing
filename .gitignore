@@ -46,3 +46,4 @@ documents_api_Production/
 *.zip
 *.tar.gz
 *.rar
+ia-agent-tickets-v2/backend/venv/
