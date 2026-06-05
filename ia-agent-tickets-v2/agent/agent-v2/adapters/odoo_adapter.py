@@ -171,7 +171,7 @@ class OdooAdapter(ITicketPort):
 
         stages = self._call_kw(
             "helpdesk.ticket.stage", "search_read",
-            [[[["is_resolve", "=", True], ["active", "=", True]]]],
+            [[["is_resolve", "=", True], ["active", "=", True]]],
             {"fields": ["id", "name"], "limit": 1},
         )
         if not stages:
@@ -189,7 +189,7 @@ class OdooAdapter(ITicketPort):
 
         stages = self._call_kw(
             "helpdesk.ticket.stage", "search_read",
-            [[[["is_start", "=", True], ["active", "=", True]]]],
+            [[["is_start", "=", True], ["active", "=", True]]],
             {"fields": ["id", "name"], "limit": 1},
         )
         if not stages:
@@ -268,10 +268,10 @@ class OdooAdapter(ITicketPort):
         """
         return self._call_kw(
             "helpdesk.ticket.base", "search_read",
-            [[["stage_id.is_close", "=", False],
+            [["stage_id.is_close", "=", False],
               "|",
               ["creado_por", "=", user_id],
-              ["usuario_solicitante_id", "=", user_id]]],
+              ["usuario_solicitante_id", "=", user_id]],
             {"fields": [
                 "name", "asunto", "stage_id", "urgency_id",
                 "ticket_type_id", "fecha_creacion", "partner_id",
@@ -282,7 +282,7 @@ class OdooAdapter(ITicketPort):
         """Returns tickets currently assigned to the given agent."""
         return self._call_kw(
             "helpdesk.ticket.base", "search_read",
-            [[[["asignado_a", "=", user_id], ["stage_id.is_close", "=", False]]]],
+            [[["asignado_a", "=", user_id], ["stage_id.is_close", "=", False]]],
             {"fields": [
                 "name", "asunto", "stage_id", "urgency_id", "priority_id",
                 "ticket_type_id", "partner_id", "fecha_creacion",
@@ -332,8 +332,19 @@ class OdooAdapter(ITicketPort):
         return {"success": True, "ticket_id": ticket_id}
 
     def get_all_tickets(self, filters: dict = None) -> list:
-        """Returns all tickets. Supports filters dict with Odoo field names."""
+        """
+        Returns open/active tickets by default (not closed/resolved).
+        To include closed tickets, pass {"stage_id.is_close": True} or
+        omit the default by passing an empty filters dict and include_closed=True.
+
+        Supports filters dict with Odoo field names.
+        Limit: 50 tickets — use filters for narrower views.
+        """
         domain = []
+        # Default: only open tickets (stage not closed/resolved).
+        # Supervisor can override by explicitly filtering for closed stages.
+        if not filters or "stage_id.is_close" not in filters:
+            domain.append(["stage_id.is_close", "=", False])
         if filters:
             for key, value in filters.items():
                 domain.append([key, "=", value])
@@ -345,8 +356,9 @@ class OdooAdapter(ITicketPort):
                 "name", "asunto", "stage_id", "urgency_id", "priority_id",
                 "ticket_type_id", "partner_id", "asignado_a",
                 "agent_group_id", "fecha_creacion",
-                "sla_status", "deadline_date", "is_about_to_expire",  # Fix: visibilidad SLA para supervisor
-            ], "limit": 200},
+                "sla_status", "deadline_date", "is_about_to_expire",
+                "approval_status",
+            ], "limit": 50},
         )
 
     def assign_ticket(self, ticket_id: int, assignee_id: int,
@@ -437,7 +449,7 @@ class OdooAdapter(ITicketPort):
     def get_ticket_types(self) -> list:
         return self._call_kw(
             "helpdesk.ticket.type", "search_read",
-            [[[["active", "=", True]]]],
+            [[["active", "=", True]]],
             {"fields": ["id", "name"], "order": "sequence"},
         )
 
@@ -454,28 +466,28 @@ class OdooAdapter(ITicketPort):
 
         return self._call_kw(
             "helpdesk.category", "search_read",
-            [[domain]],
+            [domain],
             {"fields": ["id", "name", "full_name", "level", "parent_id"], "order": "sequence"},
         )
 
     def get_urgency_levels(self) -> list:
         return self._call_kw(
             "helpdesk.ticket.urgency", "search_read",
-            [[[["active", "=", True]]]],
+            [[["active", "=", True]]],
             {"fields": ["id", "name"], "order": "sequence"},
         )
 
     def get_impact_levels(self) -> list:
         return self._call_kw(
             "helpdesk.ticket.impact", "search_read",
-            [[[["active", "=", True]]]],
+            [[["active", "=", True]]],
             {"fields": ["id", "name"], "order": "sequence"},
         )
 
     def get_priority_levels(self) -> list:
         return self._call_kw(
             "helpdesk.ticket.priority", "search_read",
-            [[[["active", "=", True]]]],
+            [[["active", "=", True]]],
             {"fields": ["id", "name"], "order": "sequence"},
         )
 
@@ -486,7 +498,7 @@ class OdooAdapter(ITicketPort):
         """
         return self._call_kw(
             "helpdesk.ticket.stage", "search_read",
-            [[[["active", "=", True]]]],
+            [[["active", "=", True]]],
             {"fields": ["id", "name", "is_start", "is_resolve", "is_close", "is_pause"],
              "order": "sequence"},
         )
@@ -494,7 +506,7 @@ class OdooAdapter(ITicketPort):
     def get_agent_groups(self) -> list:
         return self._call_kw(
             "helpdesk.agent.group", "search_read",
-            [[[]]],
+            [[]],
             {"fields": ["id", "name"]},
         )
 
@@ -505,12 +517,12 @@ class OdooAdapter(ITicketPort):
         """
         return self._call_kw(
             "res.users", "search_read",
-            [[[
+            [[
                 ["share", "=", False],
                 "|",
                 ["groups_id.full_name", "ilike", "Helpdesk / Agente"],
                 ["groups_id.full_name", "ilike", "Helpdesk / Manager"],
-            ]]],
+            ]],
             {"fields": ["id", "name", "login"]},
         )
 
@@ -521,9 +533,9 @@ class OdooAdapter(ITicketPort):
         """
         raw = self._call_kw(
             "helpdesk.ticket.base", "search_read",
-            [[["|",
+            [["|",
                ["stage_id.is_resolve", "=", True],
-               ["stage_id.is_close",   "=", True]]]],
+               ["stage_id.is_close",   "=", True]]],
             {"fields": [
                 "id", "name", "ticket_type_id", "category_id",
                 "descripcion", "motivo_resolucion", "causa_raiz",

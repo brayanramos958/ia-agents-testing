@@ -19,6 +19,9 @@ Supported checkpoint backends:
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
 from config.settings import settings
+from core.logging import get_logger
+
+_log = get_logger(__name__)
 
 # Module-level holder — set once during lifespan startup
 _checkpointer_instance = None
@@ -38,7 +41,7 @@ def _build_vercel_llm():
         temperature=0.1,
         timeout=60,
     )
-    print(f"[LLM] Vercel AI Gateway: {settings.ai_gateway_model} @ {settings.ai_gateway_base_url}")
+    _log.info("llm_init", extra={"provider": "vercel", "model": settings.ai_gateway_model, "base_url": settings.ai_gateway_base_url})
     return llm
 
 
@@ -51,7 +54,7 @@ def _build_ollama_llm():
         num_ctx=8192,  # cap context to prevent OOM crashes on CPU
         think=False,   # disable Qwen3 chain-of-thought — reduces tokens and prevents crashes
     )
-    print(f"[LLM] Ollama: {settings.ollama_model} @ {settings.ollama_base_url} (ctx=8192, think=off)")
+    _log.info("llm_init", extra={"provider": "ollama", "model": settings.ollama_model, "base_url": settings.ollama_base_url})
     return llm
 
 
@@ -82,7 +85,7 @@ def _build_groq_llm():
     )
 
     if not settings.openrouter_api_key:
-        print("[LLM] Groq: meta-llama/llama-4-scout-17b-16e-instruct (sin fallback — OPENROUTER_API_KEY no configurada)")
+        _log.info("llm_init", extra={"provider": "groq", "model": settings.llm_model, "fallback_enabled": False})
         return primary
 
     fallbacks = [
@@ -96,8 +99,7 @@ def _build_groq_llm():
         for model in settings.openrouter_fallback_models
     ]
 
-    names = " -> ".join(settings.openrouter_fallback_models)
-    print(f"[LLM] Groq: {settings.llm_model} -> fallbacks: {names}")
+    _log.info("llm_init", extra={"provider": "groq", "model": settings.llm_model, "fallback_count": len(fallbacks)})
 
     return primary.with_fallbacks(
         fallbacks,
@@ -140,7 +142,7 @@ async def init_checkpointer() -> None:
         checkpointer = AsyncSqliteSaver(conn)
         await checkpointer.setup()
         _checkpointer_instance = checkpointer
-        print(f"[checkpointer] AsyncSqliteSaver ready — {settings.checkpoint_db_path}")
+        _log.info("checkpointer_ready", extra={"backend": "sqlite", "path": settings.checkpoint_db_path})
 
     elif settings.checkpoint_backend == "postgres":
         if not settings.postgres_dsn:
@@ -164,12 +166,12 @@ async def init_checkpointer() -> None:
         pool = AsyncConnectionPool(conninfo=settings.postgres_dsn, max_size=20, open=False)
         await pool.open()
         _checkpointer_instance = AsyncPostgresSaver(pool)
-        print(f"[checkpointer] AsyncPostgresSaver ready — {settings.postgres_dsn.split('@')[-1]}")
+        _log.info("checkpointer_ready", extra={"backend": "postgres", "host": settings.postgres_dsn.split("@")[-1]})
 
     else:
         from langgraph.checkpoint.memory import MemorySaver
         _checkpointer_instance = MemorySaver()
-        print("[checkpointer] MemorySaver ready (in-memory, lost on restart)")
+        _log.info("checkpointer_ready", extra={"backend": "memory"})
 
 
 def build_checkpointer():

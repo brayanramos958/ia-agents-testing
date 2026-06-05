@@ -63,6 +63,15 @@ class Settings(BaseSettings):
     # Minimum confidence to present a solution before creating a ticket
     rag_similarity_threshold: float = 0.6
 
+    # ── LLM concurrency ──────────────────────────────────────────────────────
+    # Max simultaneous LLM calls before requests wait in line.
+    # Prevents saturating the provider (Groq: 30 req/min, Vercel: variable).
+    # Requests beyond this limit wait up to llm_semaphore_timeout seconds.
+    llm_max_concurrent: int = 20
+    # Seconds a request waits for a slot in the semaphore before getting
+    # a "system busy" reply.
+    llm_semaphore_timeout: float = 30.0
+
     # ── Rate limiting ────────────────────────────────────────────────────────
     # Per-user sliding-window limit (requests per 60 seconds).
     # Applied to /agent/chat and /agent/stream.

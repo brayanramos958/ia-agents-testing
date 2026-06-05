@@ -26,7 +26,9 @@ from fastapi.responses import StreamingResponse
 
 from api.schemas.chat import ChatRequest
 from api.middleware.rate_limit import check_rate_limit
+from api.middleware.injection_detector import scan_message  # Security Capa 2
 from core.agent import get_or_create_agent, stream_response
+from core.context import current_thread_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -43,6 +45,12 @@ async def chat_stream(request: ChatRequest):
     check_rate_limit(request.user_id)
     raw_thread = request.thread_id or str(date.today())
     thread_id = f"{request.user_id}:{raw_thread}"
+    current_thread_id.set(thread_id)
+
+    # Security Capa 2: scan for prompt injection before reaching the LLM
+    detection = scan_message(request.message, request.user_id, thread_id)
+    if detection.blocked:
+        raise HTTPException(status_code=400, detail=f"Mensaje bloqueado: {detection.reason}")
 
     try:
         agent = get_or_create_agent(request.user_rol)

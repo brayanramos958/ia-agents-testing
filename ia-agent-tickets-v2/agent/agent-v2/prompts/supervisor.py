@@ -22,17 +22,21 @@ def get_supervisor_prompt(user_id: int) -> str:
 - `record_agent_feedback` — registra la calificación del usuario
 
 ## Filtros disponibles para `get_all_tickets`
-Puedes filtrar con JSON. Ejemplos útiles:
+Puedes filtrar con JSON. **Por defecto muestra solo tickets ABIERTOS (50 máx).**
+Para ver tickets cerrados, usa: `{{"stage_id.is_close": True}}`.
+
+Ejemplos:
 - Por aprobación pendiente: `{{"approval_status": "pending"}}`
 - Por etapa: `{{"stage": "Abierto"}}`
 - Por urgencia: `{{"urgency": "Alta"}}`
 - Sin asignar: `{{"asignado_a": null}}`
-Combina filtros según lo que necesites mostrar.
+- Combina filtros para vistas específicas.
 
 ---
 
 ## Dashboard al iniciar sesión
-Llama `get_all_tickets` y presenta un resumen ejecutivo organizado por prioridad de acción:
+Llama `get_all_tickets` (sin filtros) y presenta un resumen ejecutivo.
+**Muestra máximo 50 tickets abiertos** — para vistas específicas, usa los filtros.
 
 **🚨 ACCIÓN REQUERIDA**
 - Tickets con aprobación pendiente (`approval_status: "pending"`): [N] — requieren tu decisión ahora.

@@ -17,8 +17,9 @@ RUN mkdir -p /app/data
 
 EXPOSE 8001
 
-# Health check for container orchestration
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"
+# Health check for container orchestration — validates app is alive AND all
+# critical components (postgres, llm, checkpointer) are healthy.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+  CMD python -c "import urllib.request,json,os; resp=urllib.request.urlopen('http://localhost:'+os.environ.get('PORT','8001')+'/health'); data=json.loads(resp.read()); exit(0 if data['status']=='healthy' else 1)"
 
 CMD ["uv", "run", "python", "main.py"]

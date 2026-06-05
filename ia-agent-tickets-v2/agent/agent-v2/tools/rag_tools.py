@@ -10,9 +10,9 @@ This is separate from the ticket system's own satisfaction survey.
 
 import json
 from typing import Any, Optional, Union
-
 from langchain_core.tools import tool
 from ports.rag_port import IRAGPort, SuggestionResult
+from core.security import frame_external_data
 from feedback.collector import FeedbackCollector
 
 
@@ -87,13 +87,13 @@ def suggest_solution(description: Any, category: Any = "") -> str:
             f"{s.ticket_name} ({s.category})" for s in result.solutions[1:3]
         ) + "."
 
-    return (
-        f"SOLUCIÓN ENCONTRADA (confianza: {result.confidence:.2f}): "
+    return frame_external_data(
+        f"SOLUCIÓN ENCONTRADA (confianza: {result.confidence:.2f}). "
         f"Caso similar: {top.ticket_name} — {top.description}. "
         f"Solución aplicada: {top.motivo_resolucion}. "
-        f"Causa raíz: {top.causa_raiz or 'No registrada'}.{others} "
-        "Presenta esta solución al usuario en pasos simples y pregunta si resolvió su problema."
-    )
+        f"Causa raíz: {top.causa_raiz or 'No registrada'}.{others}",
+        source="rag (base de conocimiento)",
+    ) + "\nPresenta esta solución al usuario en pasos simples y pregunta si resolvió su problema."
 
 
 @tool

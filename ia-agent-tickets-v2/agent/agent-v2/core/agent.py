@@ -16,8 +16,25 @@ import asyncio
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langgraph.prebuilt import create_react_agent
 from langgraph.prebuilt.tool_node import ToolNode
+from config.settings import settings
+from core.security import frame_external_data
 
 _log = logging.getLogger(__name__)
+
+# ── LLM concurrency semaphore ─────────────────────────────────────────────────
+# Limits simultaneous LLM calls to prevent saturating Groq/Vercel rate limits.
+# Initialised lazily on first request so settings is fully loaded.
+_LLM_SEMAPHORE: asyncio.Semaphore | None = None
+
+
+def _get_llm_semaphore() -> asyncio.Semaphore:
+    """Lazy-init the LLM semaphore from settings. Thread-safe idempotent."""
+    global _LLM_SEMAPHORE
+    if _LLM_SEMAPHORE is None:
+        max_conc = settings.llm_max_concurrent
+        _LLM_SEMAPHORE = asyncio.Semaphore(max_conc)
+        _log.info("llm_semaphore_initialised", extra={"max_concurrent": max_conc})
+    return _LLM_SEMAPHORE
 
 
 # ── Creator context cache ─────────────────────────────────────────────────────
@@ -27,6 +44,26 @@ _log = logging.getLogger(__name__)
 
 _creator_context_cache: dict = {}
 _CREATOR_CONTEXT_CACHE_MAX = 500  # threads to keep in memory
+
+
+def _extract_category_name(ticket: dict) -> str:
+    """Extract human-readable category from Odoo/Express ticket dict."""
+    cat = ticket.get("category_id")
+    if isinstance(cat, list) and len(cat) >= 2:
+        return str(cat[1])
+    if isinstance(cat, str) and cat:
+        return cat
+    return "Sin categoría"
+
+
+def _extract_type_name(ticket: dict) -> str:
+    """Extract human-readable ticket type from Odoo/Express ticket dict."""
+    tt = ticket.get("ticket_type_id")
+    if isinstance(tt, list) and len(tt) >= 2:
+        return str(tt[1])
+    if isinstance(tt, str) and tt:
+        return tt
+    return "Sin tipo"
 
 
 async def _fetch_creator_context(user_id: int, thread_id: str) -> str:
@@ -74,7 +111,13 @@ async def _fetch_creator_context(user_id: int, thread_id: str) -> str:
             else:
                 lines = ["\n\n## Historial del usuario (tickets abiertos):"]
                 for t in open_tickets[:3]:
-                    lines.append(f"- {t.get('name','N/A')}: {t.get('asunto','N/A')}")
+                    cat = _extract_category_name(t)
+                    ttype = _extract_type_name(t)
+                    created = str(t.get("create_date", "?"))[:10]
+                    lines.append(
+                        f"- {t.get('name','N/A')} | {ttype} | {cat} | {created}"
+                        f"\n  Asunto: {t.get('asunto','N/A')}"
+                    )
                 if len(open_tickets) > 3:
                     lines.append(f"(+{len(open_tickets)-3} mas)")
                 result = "\n".join(lines)
@@ -98,6 +141,78 @@ def invalidate_creator_context(thread_id: str) -> None:
     the newly created ticket in the user's history.
     """
     _creator_context_cache.pop(thread_id, None)
+
+
+# ── Resolver context cache ────────────────────────────────────────────────────
+# Same pattern as creator context: pre-fetch assigned tickets once per thread.
+# Avoids the resolver having to call get_my_assigned_tickets on every message.
+
+_resolver_context_cache: dict = {}
+_RESOLVER_CONTEXT_CACHE_MAX = 500
+
+
+async def _fetch_resolver_context(user_id: int, thread_id: str) -> str:
+    """
+    Pre-fetches tickets assigned to this resolver and returns a formatted
+    context block to inject into the system prompt.
+
+    Cached by thread_id — only calls Odoo once per conversation.
+    """
+    if thread_id in _resolver_context_cache:
+        return _resolver_context_cache[thread_id]
+
+    try:
+        from tools.ticket_tools import _port
+        if _port is None:
+            return ""
+        tickets = await asyncio.to_thread(_port.get_tickets_by_assignee, user_id)
+        if not tickets:
+            result = "\n\n## Tickets asignados\nNo tienes tickets asignados."
+        else:
+            # Count SLA statuses
+            sla_expired = sum(1 for t in tickets if t.get("sla_status") == "failed")
+            sla_at_risk = sum(1 for t in tickets if t.get("is_about_to_expire"))
+            pending_approval = sum(1 for t in tickets if t.get("approval_status") == "pending")
+
+            lines = [
+                "\n## Tickets asignados",
+                f"Total: {len(tickets)} | "
+                f"🔴 SLA vencido: {sla_expired} | "
+                f"⚠️ SLA próximo: {sla_at_risk} | "
+                f"📋 Pendiente aprobación: {pending_approval}",
+                "",
+            ]
+            for t in tickets[:8]:
+                cat = _extract_category_name(t)
+                sla = t.get("sla_status", "-")
+                sla_flag = "🔴" if sla == "failed" else "⚠️" if t.get("is_about_to_expire") else "  "
+                # Extract human-readable priority (Odoo returns [id, "Name"])
+                priority = t.get("priority_id")
+                if isinstance(priority, list) and len(priority) >= 2:
+                    priority = str(priority[1])
+                elif isinstance(priority, str):
+                    pass
+                else:
+                    priority = "?"
+                lines.append(
+                    f"{sla_flag} {t.get('name','N/A')} | {cat} | "
+                    f"Prioridad: {priority} | "
+                    f"Asunto: {t.get('asunto','N/A')[:60]}"
+                )
+            if len(tickets) > 8:
+                lines.append(f"(+{len(tickets)-8} mas)")
+            result = "\n".join(lines)
+    except Exception as exc:
+        _log.debug("Could not pre-fetch resolver tickets: %s", exc)
+        result = ""
+
+    # FIFO eviction
+    if len(_resolver_context_cache) >= _RESOLVER_CONTEXT_CACHE_MAX:
+        oldest = next(iter(_resolver_context_cache))
+        del _resolver_context_cache[oldest]
+
+    _resolver_context_cache[thread_id] = result
+    return result
 
 
 from ports.ticket_port import ITicketPort
@@ -316,6 +431,13 @@ async def _prepare_invocation(
 
     if user_role == "creador":
         tickets_ctx = await _fetch_creator_context(user_id, thread_id)
+        if tickets_ctx:
+            tickets_ctx = frame_external_data(tickets_ctx, "historial del usuario (Odoo)")
+        system_content = system_content + tickets_ctx
+    elif user_role == "resueltor":
+        tickets_ctx = await _fetch_resolver_context(user_id, thread_id)
+        if tickets_ctx:
+            tickets_ctx = frame_external_data(tickets_ctx, "tickets asignados (Odoo)")
         system_content = system_content + tickets_ctx
 
     config = {
@@ -378,7 +500,24 @@ async def get_response(
     from core.context import current_user_id as _uid_var
     _uid_var.set(user_id)
 
-    result = await agent.ainvoke(input_data, config=config)
+    sem = _get_llm_semaphore()
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout=settings.llm_semaphore_timeout)
+    except asyncio.TimeoutError:
+        _log.warning(
+            "llm_semaphore_timeout",
+            extra={"timeout": settings.llm_semaphore_timeout, "thread_id": thread_id})
+        return (
+            "El sistema está procesando muchas solicitudes en este momento. "
+            "Por favor intenta de nuevo en unos segundos."
+        )
+
+    try:
+        _log.info("LLM call started user=%s thread=%s", user_id, thread_id)
+        result = await agent.ainvoke(input_data, config=config)
+    finally:
+        sem.release()
+        _log.debug("LLM call finished user=%s thread=%s", user_id, thread_id)
 
     # Invalidate creator context cache when create_ticket succeeds so the next
     # message reflects the newly created ticket in the user's history.
@@ -439,7 +578,19 @@ async def stream_response(
     from core.context import current_user_id as _uid_var
     _uid_var.set(user_id)
 
+    sem = _get_llm_semaphore()
     try:
+        await asyncio.wait_for(sem.acquire(), timeout=settings.llm_semaphore_timeout)
+    except asyncio.TimeoutError:
+        _log.warning(
+            "llm_semaphore_timeout",
+            extra={"timeout": settings.llm_semaphore_timeout, "thread_id": thread_id})
+        yield f"data: {json.dumps({'t': 'token', 'v': 'El sistema está muy ocupado. Intenta de nuevo en unos segundos.'})}\n\n"
+        yield f"data: {json.dumps({'t': 'done'})}\n\n"
+        return
+
+    try:
+        _log.info("LLM stream started user=%s thread=%s", user_id, thread_id)
         async for event in agent.astream_events(input_data, config, version="v2"):
             kind = event["event"]
 
@@ -472,3 +623,6 @@ async def stream_response(
     except Exception as exc:
         _log.exception("stream_response error thread=%s user=%s", thread_id, user_id)
         yield f"data: {json.dumps({'t': 'error', 'v': str(exc)})}\n\n"
+    finally:
+        sem.release()
+        _log.debug("LLM stream finished user=%s thread=%s", user_id, thread_id)

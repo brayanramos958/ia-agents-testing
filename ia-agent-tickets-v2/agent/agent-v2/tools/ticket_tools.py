@@ -14,6 +14,7 @@ from langchain_core.tools import tool
 from tenacity import retry, stop_after_attempt, wait_exponential
 from ports.ticket_port import ITicketPort
 from ports.rag_port import IRAGPort
+from core.security import frame_external_data
 
 # Patrón Resiliencia: Reintenta llamadas de red (Odoo/FastAPI) hasta 3 veces 
 # ante intermitencias. Espera de forma exponencial (2s, 4s, 8s).
@@ -157,7 +158,7 @@ def get_my_created_tickets(user_id: Union[int, str]) -> list:
     result = [_slim_ticket(t) for t in limited]
     if len(tickets) > 10:
         result.append({"_note": f"Showing last 10 of {len(tickets)} tickets."})
-    return result
+    return frame_external_data(result, "tickets (creador)")
 
 
 # ── Resolver tools ────────────────────────────────────────────────────────────
@@ -175,7 +176,7 @@ def get_my_assigned_tickets(user_id: Union[int, str]) -> list:
     result = [_slim_ticket(t) for t in limited]
     if len(tickets) > 10:
         result.append({"_note": f"Showing last 10 of {len(tickets)} tickets."})
-    return result
+    return frame_external_data(result, "tickets (resueltor)")
 
 
 @tool
@@ -226,7 +227,10 @@ def get_ticket_detail(ticket_id: Union[int, str], user_id: Union[int, str], user
     After calling this, proactively call suggest_solution
     using the ticket's description and category.
     """
-    return _port.get_ticket_detail(int(ticket_id), _safe_uid(user_id), user_role)
+    return frame_external_data(
+        _port.get_ticket_detail(int(ticket_id), _safe_uid(user_id), user_role),
+        "tickets (detalle)"
+    )
 
 
 @tool
@@ -268,7 +272,7 @@ def get_all_tickets(filters_json: str = "{}") -> list:
     result = [_slim_ticket(t) for t in limited]
     if len(tickets) > 15:
         result.append({"_note": f"Showing last 15 of {len(tickets)} tickets. Use filters to narrow results."})
-    return result
+    return frame_external_data(result, "tickets (supervisor)")
 
 
 @tool
