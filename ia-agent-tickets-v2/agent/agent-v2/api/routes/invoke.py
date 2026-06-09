@@ -18,13 +18,28 @@ Valid intents and their required parameters:
     get_catalog         → catalog_name: types|categories|urgency|impact|priority|stages
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from api.schemas.invoke import InvokeRequest, InvokeResponse
+from core.context import current_user_id, current_user_role
 import tools.ticket_tools as tt
 import tools.rag_tools as rt
 import tools.user_tools as ut
 
 router = APIRouter()
+
+# ── user_id validation ─────────────────────────────────────────────────────
+
+
+def _validate_body_match(request: InvokeRequest) -> None:
+    """Verify body user_id/role match the JWT claims."""
+    token_uid = current_user_id.get(0)
+    token_role = current_user_role.get("")
+    if token_uid and request.user_id != token_uid:
+        raise HTTPException(status_code=403,
+                            detail=f"user_id mismatch: token={token_uid} body={request.user_id}")
+    if token_role and request.user_rol != token_role:
+        raise HTTPException(status_code=403,
+                            detail=f"role mismatch: token={token_role} body={request.user_rol}")
 
 # ── Intent dispatch table ─────────────────────────────────────────────────────
 # Each handler: (parameters: dict, user_id: int) -> any
@@ -121,6 +136,8 @@ INTENT_MAP = {
 
 @router.post("/agent/invoke", response_model=InvokeResponse)
 def invoke(request: InvokeRequest) -> InvokeResponse:
+    _validate_body_match(request)
+
     handler = INTENT_MAP.get(request.intent)
 
     if not handler:

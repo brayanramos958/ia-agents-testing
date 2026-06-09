@@ -24,9 +24,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from config.settings import settings
 from api.middleware.auth import api_key_middleware
 from api.middleware.request_context import RequestContextMiddleware
+from api.middleware.jwt_auth import jwt_auth_middleware
 from api.routes.chat import router as chat_router
 from api.routes.invoke import router as invoke_router
 from api.routes.stream import router as stream_router
+from api.routes.auth import router as auth_router
 from core.agent import initialize_ports
 from core.graph import init_checkpointer
 from core.logging import configure_logging, get_logger
@@ -139,11 +141,16 @@ app.add_middleware(
 # Request context: injects request_id, thread_id into ContextVars for logging
 app.add_middleware(RequestContextMiddleware)
 
+# JWT auth: validates Bearer tokens, sets current_user_id/current_user_role
+# Must come BEFORE api_key_middleware so public paths are handled first
+app.middleware("http")(jwt_auth_middleware)
+
 app.middleware("http")(api_key_middleware)
 
 app.include_router(chat_router)
 app.include_router(invoke_router)
 app.include_router(stream_router)
+app.include_router(auth_router)
 
 
 # ── Health check (REAL — verifies ALL components) ────────────────────────────
@@ -289,4 +296,11 @@ async def health():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=settings.port)
+    cert_file = "/app/certs/cert.pem"
+    key_file = "/app/certs/key.pem"
+    import os
+    if os.path.exists(cert_file) and os.path.exists(key_file):
+        uvicorn.run(app, host="0.0.0.0", port=8443,
+                    ssl_keyfile=key_file, ssl_certfile=cert_file)
+    else:
+        uvicorn.run(app, host="0.0.0.0", port=settings.port)

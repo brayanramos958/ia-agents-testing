@@ -79,11 +79,21 @@ class Settings(BaseSettings):
     rate_limit_per_minute: int = 10
 
     # ── Auth ─────────────────────────────────────────────────────────────────
-    # Header: X-Agent-Key
+    # Header: X-Agent-Key (dev fallback)
+    # Header: Authorization: Bearer <token> (production — JWT)
     # To upgrade to OAuth2/JWT:
     #   1. Replace api_key_middleware with FastAPI OAuth2PasswordBearer dependency
     #   2. Business logic in routes stays unchanged
     agent_api_key: str = "dev-key-change-in-prod"
+
+    # ── JWT (production auth) ──────────────────────────────────────────────────
+    # Secret key used to sign JWTs. Must be at least 32 chars in production.
+    # Generate with: python -c "import secrets; print(secrets.token_hex(32))"
+    jwt_secret: str = "dev-jwt-secret-do-not-use-in-production-change-me"
+    # Algorithm for JWT signing (HS256 = HMAC-SHA256)
+    jwt_algorithm: str = "HS256"
+    # Token expiration in hours (0 = no expiration)
+    jwt_expiration_hours: int = 8
 
     # ── Conversation persistence ─────────────────────────────────────────────
     # "memory"   → InMemorySaver (lost on restart, dev only)

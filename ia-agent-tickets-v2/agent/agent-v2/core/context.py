@@ -10,3 +10,7 @@ current_user_id: ContextVar[int] = ContextVar("current_user_id", default=0)
 # Set by RequestContextMiddleware at the start of every HTTP request.
 current_thread_id: ContextVar[str] = ContextVar("current_thread_id", default="")
 current_request_id: ContextVar[str] = ContextVar("current_request_id", default="")
+
+# JWT-authenticated user role. Set by JWTAuthMiddleware after token verification.
+# Used by routes to validate body.user_rol matches the token's claim.
+current_user_role: ContextVar[str] = ContextVar("current_user_role", default="")

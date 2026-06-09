@@ -17,11 +17,16 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from config.settings import settings
 
-EXCLUDED_PATHS = {"/health", "/docs", "/openapi.json", "/redoc"}
+EXCLUDED_PATHS = {"/health", "/docs", "/openapi.json", "/redoc", "/auth/login"}
 
 
 async def api_key_middleware(request: Request, call_next):
-    if request.url.path in EXCLUDED_PATHS:
+    if request.url.path.rstrip("/") in EXCLUDED_PATHS:
+        return await call_next(request)
+
+    # If a Bearer token is present, JWT middleware handles auth — skip API key check
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
         return await call_next(request)
 
     api_key = request.headers.get("X-Agent-Key")
@@ -30,7 +35,7 @@ async def api_key_middleware(request: Request, call_next):
             status_code=401,
             content={
                 "error": "Unauthorized",
-                "detail": "Provide a valid X-Agent-Key header.",
+                "detail": "Provide a valid X-Agent-Key header or Bearer token.",
             },
         )
 

@@ -111,6 +111,72 @@ class OdooAdapter(ITicketPort):
         if not self._session_id or not self._uid:
             self._authenticate()
 
+    def authenticate_user(self, login: str, password: str) -> dict:
+        """
+        Authenticates a user against Odoo and returns their basic info.
+        
+        Args:
+            login: Odoo login (email or username)
+            password: Odoo password
+        
+        Returns:
+            {"uid": int, "name": str, "login": str, "role": str}
+            role is one of: "creador", "resueltor", "supervisor"
+        
+        Raises:
+            ValueError: invalid credentials
+        """
+        # Step 1: authenticate
+        resp = httpx.post(
+            f"{self._base_url}/web/session/authenticate",
+            json={
+                "jsonrpc": "2.0",
+                "method": "call",
+                "params": {"db": self._db, "login": login, "password": password},
+            },
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        if body.get("error"):
+            raise ValueError("Credenciales inválidas")
+        
+        result = body.get("result", {})
+        uid = result.get("uid")
+        if not uid:
+            raise ValueError("Credenciales inválidas")
+        
+        # Step 2: read user info using the service account session
+        self._ensure_session()
+        user_data = self._call_kw(
+            "res.users", "read",
+            [[uid]],
+            {"fields": ["id", "name", "login", "groups_id"]},
+        )
+        if not user_data:
+            raise ValueError(f"Usuario {uid} no encontrado en Odoo")
+        
+        user = user_data[0]
+        groups = user.get("groups_id", [])
+        
+        # Determine role from group membership
+        role = "creador"  # default
+        for g in groups:
+            if isinstance(g, list) and len(g) >= 2:
+                gname = str(g[1]).lower()
+                if "manager" in gname or "supervisor" in gname:
+                    role = "supervisor"
+                    break
+                elif "agente" in gname or "resolutor" in gname or "agent" in gname:
+                    role = "resueltor"
+        
+        return {
+            "uid": uid,
+            "name": user.get("name", ""),
+            "login": user.get("login", login),
+            "role": role,
+        }
+
     # ── JSON-RPC core ─────────────────────────────────────────────────────────
 
     def _call_kw(self, model: str, method: str, args: list, kwargs: dict = None) -> any:

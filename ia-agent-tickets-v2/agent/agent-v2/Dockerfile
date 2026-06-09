@@ -15,11 +15,13 @@ COPY . .
 # Create volume mount point for persistent feedback DB
 RUN mkdir -p /app/data
 
-EXPOSE 8001
-
 # Health check for container orchestration — validates app is alive AND all
 # critical components (postgres, llm, checkpointer) are healthy.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
   CMD python -c "import urllib.request,json,os; resp=urllib.request.urlopen('http://localhost:'+os.environ.get('PORT','8001')+'/health'); data=json.loads(resp.read()); exit(0 if data['status']=='healthy' else 1)"
 
+EXPOSE 8001
+
+# For HTTPS production: add a reverse proxy (Caddy/nginx) with Let's Encrypt.
+# Self-signed certs can be mounted at /app/certs/ via docker-compose volume.
 CMD ["uv", "run", "python", "main.py"]
