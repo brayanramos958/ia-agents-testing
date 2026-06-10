@@ -623,3 +623,157 @@ class OdooAdapter(ITicketPort):
                 "causa_raiz":        t.get("causa_raiz", ""),
             })
         return result
+
+    # ── Operation metrics ─────────────────────────────────────────────────────
+
+    def get_operation_metrics(self) -> dict:
+        """
+        Computes operational KPIs from the helpdesk database.
+
+        avg_time_to_assign_hours  — mean (fecha_creacion → approval_date) for approved tickets
+        avg_time_to_resolve_hours — mean (fecha_creacion → fecha_cierre) for resolved/closed tickets
+        tickets_by_category       — count grouped by category (top 10)
+        tickets_by_urgency        — count grouped by urgency
+        approval_rate             — count by approval_status
+        reopen_rate               — ratio of tickets that were resolved then reopened
+
+        Note: Odoo returns datetime as "YYYY-MM-DD HH:MM:SS" string. We compute
+        deltas by parsing with strptime — safe because the format is fixed.
+        """
+        from datetime import datetime
+
+        def _hours_between(start_str: str, end_str: str) -> float:
+            if not start_str or not end_str:
+                return 0.0
+            try:
+                fmt = "%Y-%m-%d %H:%M:%S"
+                start = datetime.strptime(start_str[:19], fmt)
+                end = datetime.strptime(end_str[:19], fmt)
+                return (end - start).total_seconds() / 3600.0
+            except (ValueError, TypeError):
+                return 0.0
+
+        def _avg_hours(starts: list, ends: list) -> float:
+            pairs = [(s, e) for s, e in zip(starts, ends) if s and e]
+            if not pairs:
+                return 0.0
+            total = sum(_hours_between(s, e) for s, e in pairs)
+            return round(total / len(pairs), 2)
+
+        result = {
+            "avg_time_to_assign_hours": 0.0,
+            "avg_time_to_resolve_hours": 0.0,
+            "tickets_by_category": [],
+            "tickets_by_urgency": [],
+            "approval_rate": {"approved": 0, "rejected": 0, "pending": 0},
+            "reopen_rate": 0.0,
+        }
+
+        try:
+            # ── MTTN (Mean Time To Notify/assign) ──────────────────────────
+            # approval_date is set when the supervisor approves the ticket.
+            # We measure creation → approval, which is the actual assign latency.
+            approved = self._call_kw(
+                "helpdesk.ticket.base", "search_read",
+                [[["approval_date", "!=", False]]],
+                {"fields": ["fecha_creacion", "approval_date"], "limit": 500},
+            )
+            if approved:
+                result["avg_time_to_assign_hours"] = _avg_hours(
+                    [t.get("fecha_creacion", "") for t in approved],
+                    [t.get("approval_date", "") for t in approved],
+                )
+
+            # ── MTTR (Mean Time To Resolve) ────────────────────────────────
+            # fecha_cierre is set when ticket is moved to a closed stage.
+            # We measure creation → closure across ALL tickets with fecha_cierre.
+            closed = self._call_kw(
+                "helpdesk.ticket.base", "search_read",
+                [[["fecha_cierre", "!=", False]]],
+                {"fields": ["fecha_creacion", "fecha_cierre"], "limit": 500},
+            )
+            if closed:
+                result["avg_time_to_resolve_hours"] = _avg_hours(
+                    [t.get("fecha_creacion", "") for t in closed],
+                    [t.get("fecha_cierre", "") for t in closed],
+                )
+
+            # ── Distribution by category (level 1 only) ─────────────────────
+            by_cat = self._call_kw(
+                "helpdesk.ticket.base", "read_group",
+                [[]],
+                {
+                    "fields": ["category_id"],
+                    "groupby": ["category_id"],
+                    "limit": 10,
+                },
+            )
+            result["tickets_by_category"] = [
+                {
+                    "category": (g["category_id"][1] if isinstance(g.get("category_id"), list) and len(g["category_id"]) >= 2 else "Sin categoría"),
+                    "count": g["category_id_count"],
+                }
+                for g in by_cat
+                if g.get("category_id")
+            ]
+
+            # ── Distribution by urgency ────────────────────────────────────
+            by_urg = self._call_kw(
+                "helpdesk.ticket.base", "read_group",
+                [[]],
+                {
+                    "fields": ["urgency_id"],
+                    "groupby": ["urgency_id"],
+                },
+            )
+            result["tickets_by_urgency"] = [
+                {
+                    "urgency": (g["urgency_id"][1] if isinstance(g.get("urgency_id"), list) and len(g["urgency_id"]) >= 2 else "Sin urgencia"),
+                    "count": g["urgency_id_count"],
+                }
+                for g in by_urg
+                if g.get("urgency_id")
+            ]
+
+            # ── Approval rate ──────────────────────────────────────────────
+            by_appr = self._call_kw(
+                "helpdesk.ticket.base", "read_group",
+                [[]],
+                {
+                    "fields": ["approval_status"],
+                    "groupby": ["approval_status"],
+                },
+            )
+            appr_counts = {
+                g["approval_status"]: g["approval_status_count"]
+                for g in by_appr
+                if g.get("approval_status")
+            }
+            result["approval_rate"] = {
+                "approved": appr_counts.get("approved", 0),
+                "rejected": appr_counts.get("rejected", 0),
+                "pending":  appr_counts.get("pending", 0),
+            }
+
+            # ── Reopen rate ────────────────────────────────────────────────
+            # Reopen detection: tickets that have motivo_resolucion filled AND
+            # motivo_resolucion contains the "Reabierto:" marker (added by
+            # reopen_ticket). This is a proxy — full history tracking would
+            # require chatter integration (future work).
+            reopened = self._call_kw(
+                "helpdesk.ticket.base", "search_count",
+                [[["motivo_resolucion", "ilike", "Reabierto:"]]],
+            )
+            total_resolved = self._call_kw(
+                "helpdesk.ticket.base", "search_count",
+                [[["motivo_resolucion", "!=", False]]],
+            )
+            if total_resolved > 0:
+                result["reopen_rate"] = round(reopened / total_resolved, 4)
+
+        except Exception as exc:
+            # Don't fail the whole metrics endpoint — return what we have
+            # plus the error message in a separate field for debugging.
+            result["_error"] = str(exc)
+
+        return result

@@ -256,3 +256,20 @@ class ExpressAdapter(ITicketPort):
                 "motivo_resolucion": t.get("resolucion", ""),
             })
         return result
+
+    # ── Operation metrics ─────────────────────────────────────────────────────
+
+    def get_operation_metrics(self) -> dict:
+        """
+        Dev stub — returns empty operation metrics.
+        The Express backend doesn't expose aggregated KPIs yet.
+        When it does, replace this with real queries.
+        """
+        return {
+            "avg_time_to_assign_hours": 0.0,
+            "avg_time_to_resolve_hours": 0.0,
+            "tickets_by_category": [],
+            "tickets_by_urgency": [],
+            "approval_rate": {"approved": 0, "rejected": 0, "pending": 0},
+            "reopen_rate": 0.0,
+        }

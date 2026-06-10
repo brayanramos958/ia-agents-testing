@@ -160,3 +160,27 @@ class ITicketPort(ABC):
         Each item must contain: ticket_id, ticket_type, category, description,
                                 motivo_resolucion (resolution text)
         """
+
+    # ── Operation metrics (Phase 1) ───────────────────────────────────────────
+
+    @abstractmethod
+    def get_operation_metrics(self) -> dict:
+        """
+        Returns operational metrics computed from the ticket system.
+        Used by GET /agent/metrics — populates the "operation" section.
+
+        Returns a dict with:
+            avg_time_to_assign_hours: float
+                Mean hours between ticket creation and approval.
+            avg_time_to_resolve_hours: float
+                Mean hours between ticket creation and resolution.
+            tickets_by_category: list[dict]
+                [{"category": str, "count": int}, ...]  top 10
+            tickets_by_urgency: list[dict]
+                [{"urgency": str, "count": int}, ...]
+            approval_rate: dict
+                {"approved": int, "rejected": int, "pending": int}
+            reopen_rate: float
+                Ratio of tickets that were resolved then reopened.
+        """
+
