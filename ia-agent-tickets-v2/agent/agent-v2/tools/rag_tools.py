@@ -9,17 +9,31 @@ This is separate from the ticket system's own satisfaction survey.
 """
 
 import json
+import time
 from typing import Any, Optional, Union
 from langchain_core.tools import tool
 from ports.rag_port import IRAGPort, SuggestionResult
 from core.security import frame_external_data
 from feedback.collector import FeedbackCollector
 
+# Confidence threshold for considering a RAG match "useful" (Phase 2 tracking)
+_RAG_HIT_THRESHOLD = 0.6
+
 
 def _safe_uid(llm_provided) -> int:
     from core.context import current_user_id as _uid_var
     ctx = _uid_var.get()
     return ctx if ctx else int(llm_provided)
+
+
+def _safe_role() -> str:
+    """Read current user role from context (set by middleware)."""
+    try:
+        from core.context import current_user_role as _role_var
+        return _role_var.get() or ""
+    except Exception:
+        return ""
+
 
 _rag_port: IRAGPort = None
 
@@ -61,7 +75,12 @@ def suggest_solution(description: Any, category: Any = "") -> str:
     description = _to_str(description)
     category = _to_str(category)
 
+    # ── Latency tracking (Phase 2) ──────────────────────────────────────────
+    started = time.perf_counter()
+
     if not _rag_port:
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        # No port → can't track meaningful data, but don't fail
         return (
             "SIN SOLUCIONES: No se encontraron casos similares en la base de conocimiento. "
             "Procede a recopilar los datos del ticket y llama a create_ticket."
@@ -73,7 +92,24 @@ def suggest_solution(description: Any, category: Any = "") -> str:
         k=5,
     )
 
-    if not result.solutions_found or result.confidence < 0.6:
+    # ── Record RAG usage in feedback.db (Phase 2) ───────────────────────────
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    try:
+        collector = FeedbackCollector()
+        collector.record_rag_usage(
+            user_id=_safe_uid(0) or None,  # 0 = trust ContextVar
+            user_role=_safe_role(),
+            query=description,
+            solutions_found=bool(result.solutions_found and result.confidence >= _RAG_HIT_THRESHOLD),
+            top_score=float(result.solutions[0].score) if result.solutions else 0.0,
+            threshold_used=_RAG_HIT_THRESHOLD,
+            latency_ms=elapsed_ms,
+        )
+    except Exception:
+        # Tracking is best-effort — never fail the tool call because of metrics
+        pass
+
+    if not result.solutions_found or result.confidence < _RAG_HIT_THRESHOLD:
         return (
             "SIN SOLUCIONES: No se encontraron casos similares en la base de conocimiento "
             f"(confianza: {result.confidence:.2f}). "

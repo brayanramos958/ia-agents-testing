@@ -44,6 +44,28 @@ class FeedbackCollector:
                     created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # RAG usage table — one row per suggest_solution() call.
+            # Tracks hit rate, score distribution, and latency for RAG quality monitoring.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS rag_usage (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id         INTEGER,
+                    user_role       TEXT,
+                    query           TEXT,
+                    solutions_found INTEGER NOT NULL DEFAULT 0,
+                    top_score       REAL DEFAULT 0.0,
+                    threshold_used  REAL DEFAULT 0.0,
+                    latency_ms      REAL DEFAULT 0.0,
+                    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            # Indexes for fast aggregation queries on the metrics endpoint
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rag_usage_created ON rag_usage(created_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rag_usage_hits ON rag_usage(solutions_found)"
+            )
 
     def record(self, ticket_id: int | None, user_id: int, rating: int,
                comment: str, feedback_type: str,
@@ -105,3 +127,90 @@ class FeedbackCollector:
                 (limit,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # ── RAG usage tracking (Phase 2) ────────────────────────────────────────
+
+    def record_rag_usage(
+        self,
+        user_id: int | None,
+        user_role: str | None,
+        query: str,
+        solutions_found: bool,
+        top_score: float,
+        threshold_used: float,
+        latency_ms: float,
+    ) -> dict:
+        """
+        Records one suggest_solution() call.
+
+        Args:
+            user_id: Authenticated user who triggered the call
+            user_role: 'creador' | 'resueltor' | 'supervisor'
+            query: The user's problem description (truncated to 500 chars)
+            solutions_found: True if confidence > threshold
+            top_score: Highest similarity score returned (0.0 if no results)
+            threshold_used: The confidence threshold applied
+            latency_ms: Time spent in the RAG search
+
+        Returns:
+            {"success": True, "rag_usage_id": int}
+        """
+        # Defensive truncation — the RAG query is free text, could be huge
+        if query and len(query) > 500:
+            query = query[:497] + "..."
+
+        with self._lock:
+            with sqlite3.connect(self._db_path) as conn:
+                cursor = conn.execute(
+                    """INSERT INTO rag_usage
+                       (user_id, user_role, query, solutions_found,
+                        top_score, threshold_used, latency_ms)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        user_id,
+                        user_role or "",
+                        query or "",
+                        1 if solutions_found else 0,
+                        round(top_score, 4),
+                        round(threshold_used, 4),
+                        round(latency_ms, 2),
+                    ),
+                )
+                return {"success": True, "rag_usage_id": cursor.lastrowid}
+
+    def get_rag_summary(self) -> dict:
+        """
+        Aggregate RAG usage statistics for /agent/metrics.
+
+        Returns:
+            {
+                "rag_total_calls": int,
+                "rag_hits": int,
+                "rag_hit_rate": float,    # hits / total (0.0 if no calls)
+                "rag_avg_score": float,   # avg of top_score across HITS only
+                "rag_avg_latency_ms": float,
+            }
+        """
+        with sqlite3.connect(self._db_path) as conn:
+            row = conn.execute(
+                """SELECT
+                       COUNT(*),
+                       SUM(CASE WHEN solutions_found = 1 THEN 1 ELSE 0 END),
+                       AVG(CASE WHEN solutions_found = 1 THEN top_score ELSE NULL END),
+                       AVG(latency_ms)
+                   FROM rag_usage"""
+            ).fetchone()
+
+            total = row[0] or 0
+            hits = row[1] or 0
+            avg_score = round(row[2] or 0.0, 4)
+            avg_latency = round(row[3] or 0.0, 2)
+            hit_rate = round(hits / total, 4) if total > 0 else 0.0
+
+        return {
+            "rag_total_calls": total,
+            "rag_hits": hits,
+            "rag_hit_rate": hit_rate,
+            "rag_avg_score": avg_score,
+            "rag_avg_latency_ms": avg_latency,
+        }
