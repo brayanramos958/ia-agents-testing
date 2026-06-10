@@ -36,10 +36,14 @@ async def get_llm_status():
     """
     providers = get_all_status()
 
+    # Misma lógica que /health para seleccionar el modelo del provider activo
+    provider = settings.llm_provider
+    model = settings.ai_gateway_model if provider == "vercel" else settings.llm_model
+
     return {
-        "primary_provider": settings.ai_gateway_model,
-        "llm_timeout_seconds": settings.llm_timeout,
-        "retry_max": settings.llm_retry_max,
-        "semaphore_per_worker": settings.llm_concurrency_limit,
+        "llm_provider": provider,
+        "llm_model": model,
+        "llm_max_concurrent": settings.llm_max_concurrent,
+        "llm_semaphore_timeout": settings.llm_semaphore_timeout,
         "providers": providers,
     }

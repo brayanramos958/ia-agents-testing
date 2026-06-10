@@ -235,21 +235,22 @@ def get_ticket_detail(ticket_id: Union[int, str], user_id: Union[int, str], user
 
 @tool
 @backend_retry
-def update_ticket(ticket_id: Union[int, str], fields_json: str, user_id: Union[int, str]) -> dict:
+def update_ticket(ticket_id: Union[int, str], fields: dict, user_id: Union[int, str]) -> dict:
     """
     Updates specific fields of a ticket.
     Always confirm with the user before calling this.
 
     Args:
         ticket_id: Numeric ticket ID
-        fields_json: JSON string of fields to update using Odoo technical names.
-                     Example: '{"asunto": "New title", "system_equipment": "Laptop HP"}'
+        fields: Dict of fields to update using Odoo technical names.
+                Example: {"asunto": "New title", "system_equipment": "Laptop HP"}
         user_id: Current user's ID
     """
-    try:
-        fields = json.loads(fields_json)
-    except json.JSONDecodeError as e:
-        return {"success": False, "error": f"Invalid JSON in fields_json: {e}"}
+    if not isinstance(fields, dict):
+        try:
+            fields = json.loads(fields)
+        except (json.JSONDecodeError, TypeError):
+            return {"success": False, "error": "Invalid fields: must be a dict"}
     return _port.update_ticket(int(ticket_id), fields, _safe_uid(user_id))
 
 
@@ -257,16 +258,28 @@ def update_ticket(ticket_id: Union[int, str], fields_json: str, user_id: Union[i
 
 @tool
 @backend_retry
-def get_all_tickets(filters_json: str = "{}") -> list:
+def get_all_tickets(filters: Optional[dict] = None) -> list:
     """
     Returns tickets in the system for supervisors (up to 15 most recent).
-    Optional filters as JSON string. Example: '{"stage_id": 1}' to filter by stage.
+    Optional filters as a Python dict — LangChain handles JSON serialization.
+
+    Examples of valid filter dicts:
+        {"stage_id": 1}                       # by stage
+        {"approval_status": "pending"}       # by approval status
+        {"urgency_id": 3}                     # by urgency
+        {"asignado_a": None}                  # unassigned
+        {"stage_id": 1, "urgency_id": 3}      # combined
+
     For full details on a specific ticket, use get_ticket_detail.
     """
-    try:
-        filters = json.loads(filters_json)
-    except json.JSONDecodeError:
+    if filters is None:
         filters = {}
+    if not isinstance(filters, dict):
+        # If the LLM passed a string, try to parse it; otherwise ignore.
+        try:
+            filters = json.loads(filters)
+        except (json.JSONDecodeError, TypeError):
+            filters = {}
     tickets = _port.get_all_tickets(filters)
     limited = tickets[-15:] if len(tickets) > 15 else tickets
     result = [_slim_ticket(t) for t in limited]

@@ -515,6 +515,9 @@ async def get_response(
     try:
         _log.info("LLM call started user=%s thread=%s", user_id, thread_id)
         result = await agent.ainvoke(input_data, config=config)
+    except Exception as e:
+        _log.error("LLM call failed user=%s thread=%s error=%s", user_id, thread_id, e, exc_info=True)
+        raise
     finally:
         sem.release()
         _log.debug("LLM call finished user=%s thread=%s", user_id, thread_id)

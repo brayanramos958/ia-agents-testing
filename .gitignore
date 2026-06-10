@@ -21,6 +21,7 @@ venv*/
 
 # ── Bases de datos
 *.db
+*.db-journal
 *.db-shm
 *.db-wal
 checkpoints.db*
@@ -47,3 +48,7 @@ documents_api_Production/
 *.tar.gz
 *.rar
 ia-agent-tickets-v2/backend/venv/
+
+# ── Generados por el agente (build + HTTPS demo)
+ia-agent-tickets-v2/agent/agent-v2/.build-timestamp
+ia-agent-tickets-v2/agent/agent-v2/certs/

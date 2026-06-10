@@ -334,10 +334,10 @@ class OdooAdapter(ITicketPort):
         """
         return self._call_kw(
             "helpdesk.ticket.base", "search_read",
-            [["stage_id.is_close", "=", False],
+            [[["stage_id.is_close", "=", False],
               "|",
               ["creado_por", "=", user_id],
-              ["usuario_solicitante_id", "=", user_id]],
+              ["usuario_solicitante_id", "=", user_id]]],
             {"fields": [
                 "name", "asunto", "stage_id", "urgency_id",
                 "ticket_type_id", "fecha_creacion", "partner_id",

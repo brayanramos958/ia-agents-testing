@@ -34,14 +34,23 @@ def _build_vercel_llm():
             "Get your key at https://vercel.com/dashboard → AI Gateway."
         )
 
+    # DeepSeek V4 Pro runs in "thinking mode" by default which:
+    #   1. Ignores tool definitions when tool_choice='auto'
+    #   2. Rejects tool_choice='any' with 400 Bad Request
+    # Disabling thinking makes it a standard chat model that handles tool calling.
+    extra_body = {}
+    if "deepseek" in settings.ai_gateway_model.lower():
+        extra_body = {"thinking": {"type": "disabled"}}
+
     llm = ChatOpenAI(
         api_key=settings.ai_gateway_api_key,
         base_url=settings.ai_gateway_base_url,
         model=settings.ai_gateway_model,
         temperature=0.1,
         timeout=60,
+        extra_body=extra_body,
     )
-    _log.info("llm_init", extra={"provider": "vercel", "model": settings.ai_gateway_model, "base_url": settings.ai_gateway_base_url})
+    _log.info("llm_init", extra={"provider": "vercel", "model": settings.ai_gateway_model, "base_url": settings.ai_gateway_base_url, "thinking_disabled": bool(extra_body)})
     return llm
 
 

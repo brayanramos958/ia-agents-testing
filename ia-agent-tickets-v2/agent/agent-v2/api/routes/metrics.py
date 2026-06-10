@@ -9,7 +9,6 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from feedback.collector import FeedbackCollector
-from tools.rag_tools import get_rag_stats
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -32,13 +31,28 @@ async def get_metrics():
     """
     try:
         collector = FeedbackCollector()
-        feedback_metrics = await collector.get_metrics()
-        rag_stats = get_rag_stats()
+        feedback_metrics = collector.get_summary()
     except Exception as exc:
         logger.exception("Failed to collect metrics")
         raise HTTPException(status_code=500, detail=str(exc))
 
+    # Calcular metrics derivados de los datos crudos
+    by_type = feedback_metrics.get("by_type", [])
+    type_map = {t["feedback_type"]: t for t in by_type}
+
+    suggested = type_map.get("solution_suggested", {}).get("count", 0)
+    created = type_map.get("ticket_created", {}).get("count", 0)
+    total = suggested + created
+    deflection_rate = (suggested / total) if total > 0 else 0.0
+
     return {
-        **feedback_metrics,
-        **rag_stats,
+        "total_feedback": feedback_metrics.get("total_feedback", 0),
+        "avg_satisfaction": feedback_metrics.get("average_rating", 0.0),
+        "tickets_created": created,
+        "tickets_deflected": suggested,
+        "deflection_rate": round(deflection_rate, 4),
+        # RAG stats — placeholder hasta que se implemente tracking detallado
+        "rag_hit_rate": None,
+        "rag_total_calls": None,
+        "by_type": by_type,
     }
