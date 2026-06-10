@@ -67,6 +67,39 @@ class FeedbackCollector:
                 "CREATE INDEX IF NOT EXISTS idx_rag_usage_hits ON rag_usage(solutions_found)"
             )
 
+            # LLM usage table — one row per ainvoke()/astream_events() call.
+            # Captures tokens, latency, cost, and provider for /agent/metrics/llm.
+            # Designed for cost monitoring — primary use case is to know how much
+            # each conversation is consuming from the LLM budget.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS llm_usage (
+                    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                    thread_id          TEXT,
+                    user_id            INTEGER,
+                    user_role          TEXT,
+                    provider_used      TEXT,
+                    model_used         TEXT,
+                    tokens_input       INTEGER DEFAULT 0,
+                    tokens_output      INTEGER DEFAULT 0,
+                    tokens_total       INTEGER DEFAULT 0,
+                    latency_ms         REAL DEFAULT 0.0,
+                    fallback_triggered INTEGER DEFAULT 0,
+                    cost_usd           REAL DEFAULT 0.0,
+                    error              TEXT DEFAULT '',
+                    created_at         DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            # Indexes for aggregation queries
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_llm_usage_thread ON llm_usage(thread_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_llm_usage_created ON llm_usage(created_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_llm_usage_provider ON llm_usage(provider_used)"
+            )
+
     def record(self, ticket_id: int | None, user_id: int, rating: int,
                comment: str, feedback_type: str,
                ticket_name: str = None) -> dict:
@@ -213,4 +246,198 @@ class FeedbackCollector:
             "rag_hit_rate": hit_rate,
             "rag_avg_score": avg_score,
             "rag_avg_latency_ms": avg_latency,
+        }
+
+    # ── LLM usage tracking (Phase 3) ────────────────────────────────────────
+
+    def record_llm_usage(
+        self,
+        thread_id: str,
+        user_id: int | None,
+        user_role: str | None,
+        provider_used: str,
+        model_used: str,
+        tokens_input: int,
+        tokens_output: int,
+        latency_ms: float,
+        fallback_triggered: bool = False,
+        cost_usd: float = 0.0,
+        error: str = "",
+    ) -> dict:
+        """
+        Records one LLM invocation.
+
+        Captures all metrics needed for /agent/metrics/llm:
+        - Token counts (input/output) — extracted from response_metadata.usage
+        - Latency — wall time around ainvoke()/astream_events()
+        - Provider and model — from settings + fallback chain detection
+        - Cost — calculated from token counts (DeepSeek V4 Pro via OpenCode Go)
+        - Fallback — True if a primary provider failure triggered fallback
+        - Error — error message if the call failed (rows with error still get tracked)
+
+        Args:
+            thread_id: Conversation thread (for cost-per-conversation aggregation)
+            user_id: Authenticated user who triggered the call
+            user_role: 'creador' | 'resueltor' | 'supervisor'
+            provider_used: 'vercel' | 'groq' | 'ollama'
+            model_used: model name as known to the provider
+            tokens_input: prompt tokens
+            tokens_output: completion tokens
+            latency_ms: wall time
+            fallback_triggered: True if fallback was used
+            cost_usd: pre-calculated cost in USD
+            error: error message if call failed
+
+        Returns:
+            {"success": True, "llm_usage_id": int}
+        """
+        with self._lock:
+            with sqlite3.connect(self._db_path) as conn:
+                cursor = conn.execute(
+                    """INSERT INTO llm_usage
+                       (thread_id, user_id, user_role, provider_used, model_used,
+                        tokens_input, tokens_output, tokens_total,
+                        latency_ms, fallback_triggered, cost_usd, error)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        thread_id or "",
+                        user_id,
+                        user_role or "",
+                        provider_used or "",
+                        model_used or "",
+                        int(tokens_input or 0),
+                        int(tokens_output or 0),
+                        int(tokens_input or 0) + int(tokens_output or 0),
+                        round(latency_ms, 2),
+                        1 if fallback_triggered else 0,
+                        round(cost_usd, 6),
+                        (error or "")[:500],  # truncate long error messages
+                    ),
+                )
+                return {"success": True, "llm_usage_id": cursor.lastrowid}
+
+    def get_llm_summary(self) -> dict:
+        """
+        Aggregate LLM usage statistics for /agent/metrics.
+
+        Returns:
+            {
+                "total_calls": int,
+                "total_tokens": int,
+                "total_input_tokens": int,
+                "total_output_tokens": int,
+                "total_cost_usd": float,
+                "avg_latency_ms": float,
+                "avg_tokens_per_call": float,
+                "fallback_count": int,
+                "fallback_rate": float,     # 0.0 if no calls
+                "error_count": int,
+                "by_provider": list[dict],  # [{"provider": str, "count": int, "cost_usd": float}, ...]
+                "by_model": list[dict],     # [{"model": str, "count": int, "cost_usd": float}, ...]
+                "top_threads_by_cost": list[dict],  # top 5 most expensive conversations
+            }
+        """
+        with sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+
+            # Overall aggregates
+            overall = conn.execute(
+                """SELECT
+                       COUNT(*),
+                       COALESCE(SUM(tokens_input),  0),
+                       COALESCE(SUM(tokens_output), 0),
+                       COALESCE(SUM(tokens_total),  0),
+                       COALESCE(SUM(cost_usd),       0),
+                       COALESCE(AVG(latency_ms),     0),
+                       COALESCE(SUM(fallback_triggered), 0),
+                       COALESCE(SUM(CASE WHEN error != '' THEN 1 ELSE 0 END), 0)
+                   FROM llm_usage"""
+            ).fetchone()
+
+            total = overall[0] or 0
+            if total == 0:
+                return {
+                    "total_calls": 0,
+                    "total_tokens": 0,
+                    "total_input_tokens": 0,
+                    "total_output_tokens": 0,
+                    "total_cost_usd": 0.0,
+                    "avg_latency_ms": 0.0,
+                    "avg_tokens_per_call": 0.0,
+                    "fallback_count": 0,
+                    "fallback_rate": 0.0,
+                    "error_count": 0,
+                    "by_provider": [],
+                    "by_model": [],
+                    "top_threads_by_cost": [],
+                }
+
+            # By provider
+            by_provider = conn.execute(
+                """SELECT provider_used, COUNT(*), COALESCE(SUM(cost_usd), 0)
+                   FROM llm_usage
+                   GROUP BY provider_used
+                   ORDER BY COUNT(*) DESC"""
+            ).fetchall()
+
+            # By model
+            by_model = conn.execute(
+                """SELECT model_used, COUNT(*), COALESCE(SUM(cost_usd), 0)
+                   FROM llm_usage
+                   GROUP BY model_used
+                   ORDER BY COUNT(*) DESC
+                   LIMIT 10"""
+            ).fetchall()
+
+            # Top threads by cost
+            top_threads = conn.execute(
+                """SELECT thread_id,
+                          user_role,
+                          COUNT(*) AS turns,
+                          COALESCE(SUM(cost_usd), 0) AS cost,
+                          COALESCE(SUM(tokens_total), 0) AS tokens
+                   FROM llm_usage
+                   WHERE thread_id != ''
+                   GROUP BY thread_id
+                   ORDER BY cost DESC
+                   LIMIT 5"""
+            ).fetchall()
+
+        return {
+            "total_calls": total,
+            "total_tokens": overall[3] or 0,
+            "total_input_tokens": overall[1] or 0,
+            "total_output_tokens": overall[2] or 0,
+            "total_cost_usd": round(overall[4] or 0.0, 6),
+            "avg_latency_ms": round(overall[5] or 0.0, 2),
+            "avg_tokens_per_call": round((overall[3] or 0) / total, 2),
+            "fallback_count": overall[6] or 0,
+            "fallback_rate": round((overall[6] or 0) / total, 4),
+            "error_count": overall[7] or 0,
+            "by_provider": [
+                {
+                    "provider": row["provider_used"] or "unknown",
+                    "count": row[1],
+                    "cost_usd": round(row[2], 6),
+                }
+                for row in by_provider
+            ],
+            "by_model": [
+                {
+                    "model": row["model_used"] or "unknown",
+                    "count": row[1],
+                    "cost_usd": round(row[2], 6),
+                }
+                for row in by_model
+            ],
+            "top_threads_by_cost": [
+                {
+                    "thread_id": row["thread_id"],
+                    "user_role": row["user_role"] or "",
+                    "turns": row["turns"],
+                    "cost_usd": round(row["cost"], 6),
+                    "tokens": row["tokens"],
+                }
+                for row in top_threads
+            ],
         }

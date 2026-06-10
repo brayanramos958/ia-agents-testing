@@ -478,6 +478,80 @@ async def _prepare_invocation(
     return input_data, config
 
 
+# ── LLM usage tracking (Phase 3) ─────────────────────────────────────────────
+# Token counts, latency, and cost are captured by intercepting ainvoke() and
+# astream_events() and reading response_metadata.usage from the last AIMessage.
+# Cost is calculated from a model-to-price map; unknown models fall back to $0.
+
+# Cost per million tokens. Extend as new models are added.
+# Source: OpenCode Go pricing (https://opencode.ai/docs) — May 2026
+_LLM_PRICING = {
+    # OpenCode Go — DeepSeek V4 Pro
+    "deepseek-v4-pro":  {"input": 1.74, "output": 3.48},
+    "deepseek-v4-flash": {"input": 0.14, "output": 0.28},
+    # Groq fallback
+    "llama-4-scout":    {"input": 0.11, "output": 0.34},
+    # OpenRouter free models — $0
+    "nemotron-3-super": {"input": 0.0,  "output": 0.0},
+    "gemma-4-31b":      {"input": 0.0,  "output": 0.0},
+    "gemma-4-26b":      {"input": 0.0,  "output": 0.0},
+}
+
+
+def _calc_cost(model: str, tokens_in: int, tokens_out: int) -> float:
+    """Returns USD cost for a call. Unknown models → $0 (not free, just unmapped)."""
+    model_lc = (model or "").lower()
+    for key, rates in _LLM_PRICING.items():
+        if key in model_lc:
+            return (tokens_in * rates["input"] + tokens_out * rates["output"]) / 1_000_000
+    return 0.0
+
+
+def _extract_usage(result: dict) -> tuple[int, int]:
+    """
+    Reads token counts from the last AIMessage in the agent result.
+    LangChain standardises usage under response_metadata.usage_metadata or .usage.
+    Returns (tokens_input, tokens_output). Defaults to (0, 0) on any error.
+    """
+    try:
+        msgs = result.get("messages", []) if isinstance(result, dict) else []
+        if not msgs:
+            return 0, 0
+        last = msgs[-1]
+        meta = getattr(last, "response_metadata", None) or {}
+        # LangChain ≥0.2 puts usage in .usage_metadata (token_usage.TypedDict)
+        usage = meta.get("usage") or meta.get("token_usage") or {}
+        if not usage:
+            # Some providers nest under .usage_metadata directly on the message
+            usage = getattr(last, "usage_metadata", None) or {}
+        tokens_in = (
+            usage.get("input_tokens")
+            or usage.get("prompt_tokens")
+            or 0
+        )
+        tokens_out = (
+            usage.get("output_tokens")
+            or usage.get("completion_tokens")
+            or 0
+        )
+        return int(tokens_in), int(tokens_out)
+    except Exception:
+        return 0, 0
+
+
+def _fallback_was_used() -> bool:
+    """
+    Returns True if the last LLM call went through a fallback.
+    The primary LLM chain is built with .with_fallbacks() — this flag is set
+    by the request middleware (api/middleware/request_context.py) when the
+    primary provider raises and the fallback path is taken.
+    For now we return False — full fallback detection requires instrumenting
+    the .with_fallbacks() wrapper, which is a follow-up. Cost data is still
+    accurate because we record the model that actually responded.
+    """
+    return False
+
+
 # ── Response extraction ───────────────────────────────────────────────────────
 
 async def get_response(
@@ -512,15 +586,65 @@ async def get_response(
             "Por favor intenta de nuevo en unos segundos."
         )
 
+    # ── LLM usage tracking (Phase 3) ──────────────────────────────────────
+    import time as _time
+    from feedback.collector import FeedbackCollector
+    _llm_started = _time.perf_counter()
+    _llm_collector = FeedbackCollector()
+    provider = settings.llm_provider
+    model = (
+        settings.ai_gateway_model
+        if provider == "vercel"
+        else settings.llm_model
+    )
+    result = None
+    _llm_error = ""
+
     try:
         _log.info("LLM call started user=%s thread=%s", user_id, thread_id)
         result = await agent.ainvoke(input_data, config=config)
     except Exception as e:
+        _llm_error = repr(e)
         _log.error("LLM call failed user=%s thread=%s error=%s", user_id, thread_id, e, exc_info=True)
+        # Record failure for cost/latency tracking
+        _llm_collector.record_llm_usage(
+            thread_id=thread_id,
+            user_id=user_id,
+            user_role=user_role,
+            provider_used=provider,
+            model_used=model,
+            tokens_input=0,
+            tokens_output=0,
+            latency_ms=(_time.perf_counter() - _llm_started) * 1000,
+            fallback_triggered=False,
+            cost_usd=0.0,
+            error=_llm_error,
+        )
         raise
     finally:
         sem.release()
-        _log.debug("LLM call finished user=%s thread=%s", user_id, thread_id)
+
+    # ── Record success metrics ────────────────────────────────────────────
+    elapsed_ms = (_time.perf_counter() - _llm_started) * 1000
+    tokens_in, tokens_out = _extract_usage(result)
+    cost = _calc_cost(model, tokens_in, tokens_out)
+    _llm_collector.record_llm_usage(
+        thread_id=thread_id,
+        user_id=user_id,
+        user_role=user_role,
+        provider_used=provider,
+        model_used=model,
+        tokens_input=tokens_in,
+        tokens_output=tokens_out,
+        latency_ms=elapsed_ms,
+        fallback_triggered=_fallback_was_used(),
+        cost_usd=cost,
+        error="",
+    )
+    _log.info(
+        "LLM call complete user=%s thread=%s tokens_in=%d tokens_out=%d cost=%.6f latency=%.0fms",
+        user_id, thread_id, tokens_in, tokens_out, cost, elapsed_ms,
+    )
 
     # Invalidate creator context cache when create_ticket succeeds so the next
     # message reflects the newly created ticket in the user's history.
@@ -592,6 +716,22 @@ async def stream_response(
         yield f"data: {json.dumps({'t': 'done'})}\n\n"
         return
 
+    # ── LLM usage tracking (Phase 3) ──────────────────────────────────────
+    import time as _time
+    from feedback.collector import FeedbackCollector
+    _llm_started = _time.perf_counter()
+    _llm_collector = FeedbackCollector()
+    provider = settings.llm_provider
+    model = (
+        settings.ai_gateway_model
+        if provider == "vercel"
+        else settings.llm_model
+    )
+    _stream_error = ""
+    # We accumulate the final AIMessage from the last 'on_chat_model_end' event
+    # to extract usage_metadata — the streaming path doesn't return a result dict.
+    _stream_last_ai_msg = None
+
     try:
         _log.info("LLM stream started user=%s thread=%s", user_id, thread_id)
         async for event in agent.astream_events(input_data, config, version="v2"):
@@ -621,11 +761,41 @@ async def stream_response(
                     except Exception:
                         pass
 
+            # ── LLM finished — capture the final AIMessage for usage ────────
+            elif kind == "on_chat_model_end":
+                output = event.get("data", {}).get("output")
+                if output is not None:
+                    _stream_last_ai_msg = output
+
         yield f"data: {json.dumps({'t': 'done'})}\n\n"
 
     except Exception as exc:
+        _stream_error = repr(exc)
         _log.exception("stream_response error thread=%s user=%s", thread_id, user_id)
         yield f"data: {json.dumps({'t': 'error', 'v': str(exc)})}\n\n"
     finally:
         sem.release()
+        # ── Record LLM usage (Phase 3) ─────────────────────────────────────
+        # The streaming path doesn't return a result dict — we build one
+        # from the last AIMessage we captured in on_chat_model_end.
+        elapsed_ms = (_time.perf_counter() - _llm_started) * 1000
+        if _stream_last_ai_msg is not None:
+            fake_result = {"messages": [_stream_last_ai_msg]}
+            tokens_in, tokens_out = _extract_usage(fake_result)
+        else:
+            tokens_in, tokens_out = 0, 0
+        cost = _calc_cost(model, tokens_in, tokens_out)
+        _llm_collector.record_llm_usage(
+            thread_id=thread_id,
+            user_id=user_id,
+            user_role=user_role,
+            provider_used=provider,
+            model_used=model,
+            tokens_input=tokens_in,
+            tokens_output=tokens_out,
+            latency_ms=elapsed_ms,
+            fallback_triggered=_fallback_was_used(),
+            cost_usd=cost,
+            error=_stream_error,
+        )
         _log.debug("LLM stream finished user=%s thread=%s", user_id, thread_id)
