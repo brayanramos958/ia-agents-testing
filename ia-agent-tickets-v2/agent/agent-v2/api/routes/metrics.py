@@ -67,8 +67,9 @@ async def get_metrics():
     from tools.ticket_tools import _port as _runtime_port
     if _runtime_port is not None:
         try:
-            import asyncio
-            op_metrics = await asyncio.to_thread(_runtime_port.get_operation_metrics)
+            # _runtime_port is now fully async (Fase 8) — direct await.
+            # asyncio.gather() inside get_operation_metrics runs 7 Odoo calls in parallel.
+            op_metrics = await _runtime_port.get_operation_metrics()
             operation_section.update(op_metrics)
         except Exception as exc:
             logger.warning("Failed to collect operation metrics: %s", exc)
