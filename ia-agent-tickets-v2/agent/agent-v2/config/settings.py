@@ -72,6 +72,26 @@ class Settings(BaseSettings):
     # a "system busy" reply.
     llm_semaphore_timeout: float = 30.0
 
+    # ── HTTP client pool (Fase 8 — async migration) ──────────────────────────
+    # httpx.AsyncClient connection pool size. The adapter's AsyncClient is
+    # configured with these values. 50 connections support ~50 concurrent users
+    # without saturating the pool.
+    httpx_max_connections: int = 50
+    # Max keepalive connections in the pool. Keep a warm subset to avoid
+    # handshake overhead on hot paths.
+    httpx_max_keepalive: int = 20
+
+    # ── Async tools feature flag (Fase 8) ────────────────────────────────────
+    # When True (default), tools are async def and run directly in the event loop.
+    # When False, tools fall back to sync (compatibility mode for slow migration).
+    # Set to False only as an emergency rollback — the async path is faster.
+    enable_async_tools: bool = True
+
+    # ── Shared cache (Fase 8 — multi-worker) ────────────────────────────────
+    # TTL for creator/resolver context cache entries in PostgreSQL.
+    # 3600 = 1 hour. Use 1800 for shorter freshness, 7200 for less DB load.
+    cache_ttl_seconds: int = 3600
+
     # ── Rate limiting ────────────────────────────────────────────────────────
     # Per-user sliding-window limit (requests per 60 seconds).
     # Applied to /agent/chat and /agent/stream.

@@ -69,7 +69,7 @@ def _build_ticket_port():
     return ExpressAdapter(settings.backend_url)
 
 
-def _build_rag_port(ticket_port):
+async def _build_rag_port(ticket_port):
     """Builds the pgvector RAG store and seeds it from the ticket API."""
     from rag.store import PGVectorRAGStore
 
@@ -80,7 +80,8 @@ def _build_rag_port(ticket_port):
 
     if settings.rag_enabled:
         try:
-            resolved = ticket_port.get_resolved_tickets()
+            # ticket_port is async (Fase 8) — get_resolved_tickets is a coroutine
+            resolved = await ticket_port.get_resolved_tickets()
             count = store.initialize_from_resolved_tickets(resolved)
             if count > 0:
                 _log.info("rag_seeded", extra={"count": count})
@@ -107,7 +108,7 @@ async def lifespan(app: FastAPI):
     _ticket_port = _build_ticket_port()
     _log.info("ticket_port_ready", extra={"adapter": settings.backend_adapter})
 
-    _rag_port = _build_rag_port(_ticket_port)
+    _rag_port = await _build_rag_port(_ticket_port)
     _log.info("rag_store_ready", extra={"documents": _rag_port.count() if _rag_port and _rag_port._enabled else 0})
 
     await init_checkpointer()
@@ -119,6 +120,15 @@ async def lifespan(app: FastAPI):
     _log.info("agent_ready", extra={"uptime_start": _startup_time})
     yield
     # ── Shutdown ─────────────────────────────────────────────────────────────
+    # Close the httpx.AsyncClient in the ticket port to release connections
+    # and avoid "Unclosed client session" warnings.
+    if _ticket_port is not None and hasattr(_ticket_port, "close"):
+        try:
+            await _ticket_port.close()
+            _log.info("ticket_port_closed")
+        except Exception as exc:
+            _log.warning("ticket_port_close_failed", extra={"error": str(exc)})
+
     _ticket_port = None
     _rag_port = None
     _log.info("agent_stopping")
@@ -231,10 +241,11 @@ async def health():
     be_start = _time.time()
     try:
         if _ticket_port is not None:
-            # Minimal operation: try to get an empty list (doesn't need real data)
+            # Minimal operation: try to get resolvers (cheap call, validates auth/connectivity)
+            # _ticket_port is now async (Fase 8) — direct await, no to_thread needed.
             import asyncio as aio
-            result = await aio.wait_for(
-                aio.to_thread(_ticket_port.get_resolvers),
+            await aio.wait_for(
+                _ticket_port.get_resolvers(),
                 timeout=3.0,
             )
             components["backend"] = {

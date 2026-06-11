@@ -41,9 +41,16 @@ def _get_llm_semaphore() -> asyncio.Semaphore:
 # Avoids one Odoo round-trip per message in the same conversation.
 # Key: thread_id. Value: pre-formatted context string.
 # Cache is invalidated explicitly when create_ticket succeeds (see invalidate_creator_context).
+#
+# In multi-worker production: uses PostgreSQL cache (shared across workers).
+# In single-process dev: falls back to in-memory dict (avoids PostgreSQL round-trip).
 
-_creator_context_cache: dict = {}
+import os
+_USE_SHARED_CACHE = bool(os.environ.get("AGENT_USE_SHARED_CACHE", "1") == "1")
+
+_creator_context_cache: dict = {}  # In-memory fallback (dev only)
 _CREATOR_CONTEXT_CACHE_MAX = 500  # threads to keep in memory
+_shared_cache = None  # PostgreSQL cache instance (lazy init)
 
 
 def _extract_category_name(ticket: dict) -> str:
@@ -74,16 +81,35 @@ async def _fetch_creator_context(user_id: int, thread_id: str) -> str:
     Results are cached by thread_id — the Odoo call is made only ONCE
     per conversation thread, not on every message.
 
+    In multi-worker production: uses PostgreSQL shared cache.
+    In single-process dev: uses in-memory dict.
+
     Returns an empty string on any error so the agent can still function.
     """
-    if thread_id in _creator_context_cache:
-        return _creator_context_cache[thread_id]
+    global _shared_cache
 
+    cache_key = f"creator_ctx:{thread_id}"
+
+    # ── Read from cache (shared or in-memory) ───────────────────────────────
+    if _USE_SHARED_CACHE:
+        if _shared_cache is None:
+            from core.cache import PostgreSQLCache
+            _shared_cache = PostgreSQLCache(ttl_seconds=settings.cache_ttl_seconds)
+        cached = await _shared_cache.get(cache_key)
+        if cached is not None:
+            return cached
+    else:
+        if thread_id in _creator_context_cache:
+            return _creator_context_cache[thread_id]
+
+    # ── Cache miss — fetch from Odoo ────────────────────────────────────────
     try:
         from tools.ticket_tools import _port
         if _port is None:
             return ""
-        tickets = await asyncio.to_thread(_port.get_tickets_by_creator, user_id)
+        # Direct async call — the adapter is now fully async (Fase 8).
+        # No need for asyncio.to_thread() — the port is already on the event loop.
+        tickets = await _port.get_tickets_by_creator(user_id)
         if not tickets:
             result = "\n\n## Historial del usuario\nSin tickets registrados."
         else:
@@ -125,29 +151,52 @@ async def _fetch_creator_context(user_id: int, thread_id: str) -> str:
         _log.debug("Could not pre-fetch user tickets for context: %s", exc)
         result = ""
 
-    # Evict oldest entry if the cache is full (simple FIFO)
-    if len(_creator_context_cache) >= _CREATOR_CONTEXT_CACHE_MAX:
-        oldest = next(iter(_creator_context_cache))
-        del _creator_context_cache[oldest]
+    # ── Write to cache (shared or in-memory) ───────────────────────────────
+    if _USE_SHARED_CACHE:
+        await _shared_cache.set(cache_key, result)
+    else:
+        # Evict oldest entry if the cache is full (simple FIFO)
+        if len(_creator_context_cache) >= _CREATOR_CONTEXT_CACHE_MAX:
+            oldest = next(iter(_creator_context_cache))
+            del _creator_context_cache[oldest]
+        _creator_context_cache[thread_id] = result
 
-    _creator_context_cache[thread_id] = result
     return result
 
 
 def invalidate_creator_context(thread_id: str) -> None:
     """
-    Removes the cached creator context for a thread.
-    Call this after create_ticket succeeds so the next message reflects
+    Remove the cached creator context for a thread.
+
+    Call this after ``create_ticket`` succeeds so the next message reflects
     the newly created ticket in the user's history.
+
+    In multi-worker production: invalidates in PostgreSQL (visible to all workers).
+    In single-process dev: invalidates in-memory dict.
     """
-    _creator_context_cache.pop(thread_id, None)
+    if _USE_SHARED_CACHE and _shared_cache is not None:
+        # Fire-and-forget — we don't await in sync context.
+        # The next read will simply see the stale value briefly.
+        cache_key = f"creator_ctx:{thread_id}"
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # We're inside a running event loop — schedule as a task
+                loop.create_task(_shared_cache.delete(cache_key))
+            else:
+                loop.run_until_complete(_shared_cache.delete(cache_key))
+        except RuntimeError:
+            # No event loop available — fall back to in-memory invalidation
+            _creator_context_cache.pop(thread_id, None)
+    else:
+        _creator_context_cache.pop(thread_id, None)
 
 
 # ── Resolver context cache ────────────────────────────────────────────────────
 # Same pattern as creator context: pre-fetch assigned tickets once per thread.
 # Avoids the resolver having to call get_my_assigned_tickets on every message.
 
-_resolver_context_cache: dict = {}
+_resolver_context_cache: dict = {}  # In-memory fallback (dev only)
 _RESOLVER_CONTEXT_CACHE_MAX = 500
 
 
@@ -157,15 +206,34 @@ async def _fetch_resolver_context(user_id: int, thread_id: str) -> str:
     context block to inject into the system prompt.
 
     Cached by thread_id — only calls Odoo once per conversation.
-    """
-    if thread_id in _resolver_context_cache:
-        return _resolver_context_cache[thread_id]
 
+    In multi-worker production: uses PostgreSQL shared cache.
+    In single-process dev: uses in-memory dict.
+    """
+    global _shared_cache
+
+    cache_key = f"resolver_ctx:{thread_id}"
+
+    # ── Read from cache (shared or in-memory) ───────────────────────────────
+    if _USE_SHARED_CACHE:
+        if _shared_cache is None:
+            from core.cache import PostgreSQLCache
+            _shared_cache = PostgreSQLCache(ttl_seconds=settings.cache_ttl_seconds)
+        cached = await _shared_cache.get(cache_key)
+        if cached is not None:
+            return cached
+    else:
+        if thread_id in _resolver_context_cache:
+            return _resolver_context_cache[thread_id]
+
+    # ── Cache miss — fetch from Odoo ────────────────────────────────────────
     try:
         from tools.ticket_tools import _port
         if _port is None:
             return ""
-        tickets = await asyncio.to_thread(_port.get_tickets_by_assignee, user_id)
+        # Direct async call — the adapter is now fully async (Fase 8).
+        # No need for asyncio.to_thread() — the port is already on the event loop.
+        tickets = await _port.get_tickets_by_assignee(user_id)
         if not tickets:
             result = "\n\n## Tickets asignados\nNo tienes tickets asignados."
         else:
@@ -206,12 +274,16 @@ async def _fetch_resolver_context(user_id: int, thread_id: str) -> str:
         _log.debug("Could not pre-fetch resolver tickets: %s", exc)
         result = ""
 
-    # FIFO eviction
-    if len(_resolver_context_cache) >= _RESOLVER_CONTEXT_CACHE_MAX:
-        oldest = next(iter(_resolver_context_cache))
-        del _resolver_context_cache[oldest]
+    # ── Write to cache (shared or in-memory) ───────────────────────────────
+    if _USE_SHARED_CACHE:
+        await _shared_cache.set(cache_key, result)
+    else:
+        # FIFO eviction
+        if len(_resolver_context_cache) >= _RESOLVER_CONTEXT_CACHE_MAX:
+            oldest = next(iter(_resolver_context_cache))
+            del _resolver_context_cache[oldest]
+        _resolver_context_cache[thread_id] = result
 
-    _resolver_context_cache[thread_id] = result
     return result
 
 

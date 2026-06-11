@@ -5,44 +5,66 @@ Tools delegate to ITicketPort — they never call any HTTP endpoint directly.
 Each role gets a different subset via get_*_tools() functions.
 
 Delete is implemented here but EXCLUDED from all tool lists.
+
+ARCHITECTURE NOTE (Fase 8 — async migration):
+    All tools are ``async def`` so LangGraph 1.1+ can execute them directly
+    in the event loop without ``run_in_executor`` (no thread pool bottleneck).
+    The backing ``ITicketPort`` methods are also ``async def``.
+
+    Catalog resolution helpers (``_resolve_id``) are also async because they
+    call ``_port.get_*_catalogs()`` which is now async.
 """
 
 import json
+import logging
 from typing import Optional, Union
 
 from langchain_core.tools import tool
 from tenacity import retry, stop_after_attempt, wait_exponential
-from ports.ticket_port import ITicketPort
-from ports.rag_port import IRAGPort
-from core.security import frame_external_data
 
-# Patrón Resiliencia: Reintenta llamadas de red (Odoo/FastAPI) hasta 3 veces 
+from core.security import frame_external_data
+from ports.rag_port import IRAGPort
+from ports.ticket_port import ITicketPort
+
+logger = logging.getLogger(__name__)
+
+# Patrón Resiliencia: Reintenta llamadas de red (Odoo/FastAPI) hasta 3 veces
 # ante intermitencias. Espera de forma exponencial (2s, 4s, 8s).
 backend_retry = retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
-    reraise=True
+    reraise=True,
 )
 
 # Injected at application startup via set_ticket_port()
-_port: ITicketPort = None
-_rag_port: IRAGPort = None
+_port: ITicketPort | None = None
+_rag_port: IRAGPort | None = None
 
 
-def _resolve_id(value: str, field: str, catalog_fn) -> int:
+async def _resolve_id(value: str, field: str, catalog_fn) -> int:
     """
-    Resolves a catalog field value to a numeric ID.
+    Resolve a catalog field value to a numeric ID.
 
     - If value is already numeric: converts and returns directly (zero overhead).
     - If value is a name string: searches the catalog by name (case-insensitive)
       and returns the matching ID without an extra LLM round-trip.
-    - If the name is not found in the catalog: raises ValueError with the
-      available options so the error is actionable.
+    - If the name is not found: raises ``ValueError`` with the available options.
+
+    Args:
+        value: Catalog value (numeric ID or name string).
+        field: Field name for error messages.
+        catalog_fn: Async function returning the catalog list.
+
+    Returns:
+        int: Resolved catalog ID.
+
+    Raises:
+        ValueError: If the value cannot be resolved.
     """
     try:
         return int(value)
     except (ValueError, TypeError):
-        items = catalog_fn()
+        items = await catalog_fn()
         name_lower = str(value).lower().strip()
         match = next(
             (item for item in items if item.get("name", "").lower().strip() == name_lower),
@@ -58,23 +80,30 @@ def _resolve_id(value: str, field: str, catalog_fn) -> int:
 
 
 def _slim_ticket(t: dict) -> dict:
-    """Returns only key fields for list views — keeps tool responses compact."""
+    """Return only key fields for list views — keeps tool responses compact."""
     stage = t.get("stage_id")
     return {
-        "id":      t.get("id"),
-        "name":    t.get("name"),
-        "asunto":  t.get("asunto"),
-        "stage":   stage[1] if isinstance(stage, list) and len(stage) > 1 else stage,
+        "id": t.get("id"),
+        "name": t.get("name"),
+        "asunto": t.get("asunto"),
+        "stage": stage[1] if isinstance(stage, list) and len(stage) > 1 else stage,
         "urgency": t.get("urgency_id"),
     }
 
 
 def _safe_uid(llm_provided) -> int:
     """
-    Returns the authenticated user_id from the request context.
+    Return the authenticated user_id from the request context.
+
     Falls back to the LLM-provided value only in test environments where
     the context var was never set (default=0 signals no active request).
     This prevents a malicious prompt from making the LLM impersonate another user.
+
+    Args:
+        llm_provided: User ID from the LLM tool arguments.
+
+    Returns:
+        int: Authenticated user ID.
     """
     from core.context import current_user_id as _uid_var
     ctx = _uid_var.get()
@@ -82,12 +111,13 @@ def _safe_uid(llm_provided) -> int:
 
 
 def set_ticket_port(port: ITicketPort) -> None:
+    """Inject the ticket port at application startup."""
     global _port
     _port = port
 
 
 def set_rag_port_for_tickets(rag_port: IRAGPort) -> None:
-    """Provides RAG access so resolve_ticket can update the knowledge base."""
+    """Provide RAG access so resolve_ticket can update the knowledge base."""
     global _rag_port
     _rag_port = rag_port
 
@@ -96,7 +126,7 @@ def set_rag_port_for_tickets(rag_port: IRAGPort) -> None:
 
 @tool
 @backend_retry
-def create_ticket(
+async def create_ticket(
     asunto: str,
     ticket_type_id: Union[int, str],
     category_id: Union[int, str],
@@ -110,50 +140,50 @@ def create_ticket(
     system_equipment: str = "",
 ) -> dict:
     """
-    Creates a new support ticket.
-    IMPORTANT: Always call suggest_solution BEFORE this tool.
+    Create a new support ticket.
+
+    IMPORTANT: Always call ``suggest_solution`` BEFORE this tool.
     Only call this if the user confirmed no existing solution worked,
     or if no solution was found.
 
     Args:
-        asunto: Short title of the ticket (required)
-        descripcion: Full problem description (required)
-        ticket_type_id: ID from get_ticket_types() (required)
-        category_id: L1 category ID from get_categories() (required)
-        urgency_id: ID from get_urgency_levels() (required)
-        impact_id: ID from get_impact_levels() (required)
-        priority_id: ID from get_priority_levels() (required)
-        user_id: Current user's ID (required)
-        subcategory_id: L2 category ID (optional)
-        element_id: L3 category ID (optional)
+        asunto: Short title of the ticket.
+        descripcion: Full problem description.
+        ticket_type_id: ID from ``get_ticket_types()``.
+        category_id: L1 category ID from ``get_categories()``.
+        urgency_id: ID from ``get_urgency_levels()``.
+        impact_id: ID from ``get_impact_levels()``.
+        priority_id: ID from ``get_priority_levels()``.
+        user_id: Current user's ID.
+        subcategory_id: L2 category ID (optional).
+        element_id: L3 category ID (optional).
         system_equipment: Device or software name affected (optional).
-                         The adapter appends this to descripcion — it is not
-                         a standalone Odoo field.
     """
     payload = {
         "asunto": asunto,
         "descripcion": descripcion,
-        "ticket_type_id": _resolve_id(ticket_type_id, "ticket_type_id", _port.get_ticket_types),
-        "category_id":    _resolve_id(category_id,    "category_id",    _port.get_categories),
-        "subcategory_id": _resolve_id(subcategory_id, "subcategory_id", _port.get_categories) if subcategory_id else None,
-        "element_id":     _resolve_id(element_id,     "element_id",     _port.get_categories) if element_id     else None,
-        "urgency_id":     _resolve_id(urgency_id,     "urgency_id",     _port.get_urgency_levels),
-        "impact_id":      _resolve_id(impact_id,      "impact_id",      _port.get_impact_levels),
-        "priority_id":    _resolve_id(priority_id,    "priority_id",    _port.get_priority_levels),
+        "ticket_type_id": await _resolve_id(ticket_type_id, "ticket_type_id", _port.get_ticket_types),
+        "category_id":    await _resolve_id(category_id,    "category_id",    _port.get_categories),
+        "subcategory_id": await _resolve_id(subcategory_id, "subcategory_id", _port.get_categories) if subcategory_id else None,
+        "element_id":     await _resolve_id(element_id,     "element_id",     _port.get_categories) if element_id     else None,
+        "urgency_id":     await _resolve_id(urgency_id,     "urgency_id",     _port.get_urgency_levels),
+        "impact_id":      await _resolve_id(impact_id,      "impact_id",      _port.get_impact_levels),
+        "priority_id":    await _resolve_id(priority_id,    "priority_id",    _port.get_priority_levels),
         "system_equipment": system_equipment,
     }
-    return _port.create_ticket(payload, _safe_uid(user_id))
+    return await _port.create_ticket(payload, _safe_uid(user_id))
 
 
 @tool
 @backend_retry
-def get_my_created_tickets(user_id: Union[int, str]) -> list:
+async def get_my_created_tickets(user_id: Union[int, str]) -> list:
     """
-    Returns the most recent tickets created by the current user (up to 10).
+    Return the most recent tickets created by the current user (up to 10).
+
     Shows: ticket name, subject, stage, urgency.
-    For full details on a specific ticket, use get_ticket_detail.
+    For full details on a specific ticket, use ``get_ticket_detail``.
     """
-    tickets = _port.get_tickets_by_creator(_safe_uid(user_id))
+    tickets = await _port.get_tickets_by_creator(_safe_uid(user_id))
     limited = tickets[-10:] if len(tickets) > 10 else tickets
     result = [_slim_ticket(t) for t in limited]
     if len(tickets) > 10:
@@ -165,13 +195,14 @@ def get_my_created_tickets(user_id: Union[int, str]) -> list:
 
 @tool
 @backend_retry
-def get_my_assigned_tickets(user_id: Union[int, str]) -> list:
+async def get_my_assigned_tickets(user_id: Union[int, str]) -> list:
     """
-    Returns tickets currently assigned to the current resolver (up to 10).
+    Return tickets currently assigned to the current resolver (up to 10).
+
     Shows: ticket name, subject, stage, urgency.
-    For full details on a specific ticket, use get_ticket_detail.
+    For full details on a specific ticket, use ``get_ticket_detail``.
     """
-    tickets = _port.get_tickets_by_assignee(_safe_uid(user_id))
+    tickets = await _port.get_tickets_by_assignee(_safe_uid(user_id))
     limited = tickets[-10:] if len(tickets) > 10 else tickets
     result = [_slim_ticket(t) for t in limited]
     if len(tickets) > 10:
@@ -181,30 +212,32 @@ def get_my_assigned_tickets(user_id: Union[int, str]) -> list:
 
 @tool
 @backend_retry
-def resolve_ticket(
+async def resolve_ticket(
     ticket_id: Union[int, str],
     motivo_resolucion: str,
     causa_raiz: str,
     user_id: Union[int, str],
 ) -> dict:
     """
-    Marks a ticket as resolved.
+    Mark a ticket as resolved.
+
     Always confirm with the user before calling this.
 
     Args:
-        ticket_id: Numeric ticket ID
-        motivo_resolucion: Full description of how the problem was resolved
-        causa_raiz: Root cause explanation (what caused the problem)
-        user_id: Current resolver's user ID
+        ticket_id: Numeric ticket ID.
+        motivo_resolucion: Full description of how the problem was resolved.
+        causa_raiz: Root cause explanation.
+        user_id: Current resolver's user ID.
     """
     uid = _safe_uid(user_id)
-    result = _port.resolve_ticket(int(ticket_id), motivo_resolucion, causa_raiz, uid)
+    ticket_id_int = int(ticket_id)
+    result = await _port.resolve_ticket(ticket_id_int, motivo_resolucion, causa_raiz, uid)
 
     if result.get("success") and _rag_port:
-        ticket = _port.get_ticket_detail(int(ticket_id), uid, "resueltor")
-        _rag_port.add_resolved_ticket(
-            ticket_id=int(ticket_id),
-            ticket_name=ticket.get("name") or f"TCK-{int(ticket_id):04d}",
+        ticket = await _port.get_ticket_detail(ticket_id_int, uid, "resueltor")
+        await _rag_port.add_resolved_ticket(
+            ticket_id=ticket_id_int,
+            ticket_name=ticket.get("name") or f"TCK-{ticket_id_int:04d}",
             ticket_type=ticket.get("ticket_type") or ticket.get("tipo_requerimiento", ""),
             category=ticket.get("category") or ticket.get("categoria", ""),
             description=ticket.get("descripcion", ""),
@@ -219,58 +252,68 @@ def resolve_ticket(
 
 @tool
 @backend_retry
-def get_ticket_detail(ticket_id: Union[int, str], user_id: Union[int, str], user_role: str) -> dict:
+async def get_ticket_detail(
+    ticket_id: Union[int, str],
+    user_id: Union[int, str],
+    user_role: str,
+) -> dict:
     """
-    Returns full details of a specific ticket.
-    Includes: all fields, SLA status, deadline, stage, assignment info.
+    Return full details of a specific ticket.
 
-    After calling this, proactively call suggest_solution
-    using the ticket's description and category.
+    Includes: all fields, SLA status, deadline, stage, assignment info.
+    After calling this, proactively call ``suggest_solution`` using the
+    ticket's description and category.
     """
     return frame_external_data(
-        _port.get_ticket_detail(int(ticket_id), _safe_uid(user_id), user_role),
-        "tickets (detalle)"
+        await _port.get_ticket_detail(int(ticket_id), _safe_uid(user_id), user_role),
+        "tickets (detalle)",
     )
 
 
 @tool
 @backend_retry
-def update_ticket(ticket_id: Union[int, str], fields: dict, user_id: Union[int, str]) -> dict:
+async def update_ticket(
+    ticket_id: Union[int, str],
+    fields: dict,
+    user_id: Union[int, str],
+) -> dict:
     """
-    Updates specific fields of a ticket.
+    Update specific fields of a ticket.
+
     Always confirm with the user before calling this.
 
     Args:
-        ticket_id: Numeric ticket ID
+        ticket_id: Numeric ticket ID.
         fields: Dict of fields to update using Odoo technical names.
-                Example: {"asunto": "New title", "system_equipment": "Laptop HP"}
-        user_id: Current user's ID
+                Example: ``{"asunto": "New title", "system_equipment": "Laptop HP"}``.
+        user_id: Current user's ID.
     """
     if not isinstance(fields, dict):
         try:
             fields = json.loads(fields)
         except (json.JSONDecodeError, TypeError):
             return {"success": False, "error": "Invalid fields: must be a dict"}
-    return _port.update_ticket(int(ticket_id), fields, _safe_uid(user_id))
+    return await _port.update_ticket(int(ticket_id), fields, _safe_uid(user_id))
 
 
 # ── Supervisor tools ──────────────────────────────────────────────────────────
 
 @tool
 @backend_retry
-def get_all_tickets(filters: Optional[dict] = None) -> list:
+async def get_all_tickets(filters: Optional[dict] = None) -> list:
     """
-    Returns tickets in the system for supervisors (up to 15 most recent).
+    Return tickets in the system for supervisors (up to 15 most recent).
+
     Optional filters as a Python dict — LangChain handles JSON serialization.
 
     Examples of valid filter dicts:
-        {"stage_id": 1}                       # by stage
-        {"approval_status": "pending"}       # by approval status
-        {"urgency_id": 3}                     # by urgency
-        {"asignado_a": None}                  # unassigned
-        {"stage_id": 1, "urgency_id": 3}      # combined
+        ``{"stage_id": 1}``                       # by stage
+        ``{"approval_status": "pending"}``        # by approval status
+        ``{"urgency_id": 3}``                     # by urgency
+        ``{"asignado_a": None}``                  # unassigned
+        ``{"stage_id": 1, "urgency_id": 3}``      # combined
 
-    For full details on a specific ticket, use get_ticket_detail.
+    For full details on a specific ticket, use ``get_ticket_detail``.
     """
     if filters is None:
         filters = {}
@@ -280,7 +323,7 @@ def get_all_tickets(filters: Optional[dict] = None) -> list:
             filters = json.loads(filters)
         except (json.JSONDecodeError, TypeError):
             filters = {}
-    tickets = _port.get_all_tickets(filters)
+    tickets = await _port.get_all_tickets(filters)
     limited = tickets[-15:] if len(tickets) > 15 else tickets
     result = [_slim_ticket(t) for t in limited]
     if len(tickets) > 15:
@@ -290,93 +333,108 @@ def get_all_tickets(filters: Optional[dict] = None) -> list:
 
 @tool
 @backend_retry
-def assign_ticket(
+async def assign_ticket(
     ticket_id: Union[int, str],
     assignee_id: Union[int, str],
     agent_group_id: Union[int, str],
     user_id: Union[int, str],
 ) -> dict:
     """
-    Assigns a ticket to a resolver agent.
-    Always show the list of resolvers (get_resolvers) before calling this.
+    Assign a ticket to a resolver agent.
+
+    Always show the list of resolvers (``get_resolvers``) before calling this.
     Confirm with the user before assigning.
 
     Args:
-        ticket_id: Numeric ticket ID
-        assignee_id: ID of the resolver to assign (from get_resolvers)
-        agent_group_id: ID of the agent group (from get_agent_groups)
-        user_id: Current supervisor's user ID
+        ticket_id: Numeric ticket ID.
+        assignee_id: ID of the resolver to assign (from ``get_resolvers``).
+        agent_group_id: ID of the agent group (from ``get_agent_groups``).
+        user_id: Current supervisor's user ID.
     """
-    return _port.assign_ticket(int(ticket_id), int(assignee_id), int(agent_group_id), _safe_uid(user_id))
+    return await _port.assign_ticket(
+        int(ticket_id), int(assignee_id), int(agent_group_id), _safe_uid(user_id),
+    )
 
 
 @tool
 @backend_retry
-def reopen_ticket(ticket_id: Union[int, str], reason: str, user_id: Union[int, str]) -> dict:
-    """
-    Reopens a resolved or closed ticket.
-    Always confirm with the user before calling this.
-
-    Args:
-        ticket_id: Numeric ticket ID
-        reason: Reason for reopening the ticket
-        user_id: Current supervisor's user ID
-    """
-    return _port.reopen_ticket(int(ticket_id), reason, _safe_uid(user_id))
-
-
-@tool
-@backend_retry
-def approve_ticket(ticket_id: Union[int, str], user_id: Union[int, str]) -> dict:
-    """
-    Approves a pending ticket so the resolver can proceed with it.
-    Only valid for tickets with approval_status: "pending".
-    Always confirm with the user before calling this.
-
-    Args:
-        ticket_id: Numeric ticket ID
-        user_id: Current supervisor's user ID
-    """
-    return _port.approve_ticket(int(ticket_id), _safe_uid(user_id))
-
-
-@tool
-@backend_retry
-def reject_ticket(
+async def reopen_ticket(
     ticket_id: Union[int, str],
     reason: str,
     user_id: Union[int, str],
 ) -> dict:
     """
-    Rejects a pending ticket. The resolver will be notified it does not proceed.
-    Only valid for tickets with approval_status: "pending".
+    Reopen a resolved or closed ticket.
+
     Always confirm with the user before calling this.
 
     Args:
-        ticket_id: Numeric ticket ID
-        reason: Clear explanation of why the ticket is rejected
-        user_id: Current supervisor's user ID
+        ticket_id: Numeric ticket ID.
+        reason: Reason for reopening the ticket.
+        user_id: Current supervisor's user ID.
     """
-    return _port.reject_ticket(int(ticket_id), reason, _safe_uid(user_id))
+    return await _port.reopen_ticket(int(ticket_id), reason, _safe_uid(user_id))
+
+
+@tool
+@backend_retry
+async def approve_ticket(
+    ticket_id: Union[int, str],
+    user_id: Union[int, str],
+) -> dict:
+    """
+    Approve a pending ticket so the resolver can proceed with it.
+
+    Only valid for tickets with ``approval_status: "pending"``.
+    Always confirm with the user before calling this.
+
+    Args:
+        ticket_id: Numeric ticket ID.
+        user_id: Current supervisor's user ID.
+    """
+    return await _port.approve_ticket(int(ticket_id), _safe_uid(user_id))
+
+
+@tool
+@backend_retry
+async def reject_ticket(
+    ticket_id: Union[int, str],
+    reason: str,
+    user_id: Union[int, str],
+) -> dict:
+    """
+    Reject a pending ticket. The resolver will be notified it does not proceed.
+
+    Only valid for tickets with ``approval_status: "pending"``.
+    Always confirm with the user before calling this.
+
+    Args:
+        ticket_id: Numeric ticket ID.
+        reason: Clear explanation of why the ticket is rejected.
+        user_id: Current supervisor's user ID.
+    """
+    return await _port.reject_ticket(int(ticket_id), reason, _safe_uid(user_id))
 
 
 # ── Delete — implemented but excluded from all tool lists ─────────────────────
 
-@backend_retry
-def delete_ticket(ticket_id: str, user_id: str) -> dict:
-    """Permanently deletes a ticket. Supervisor only."""
-    return _port.delete_ticket(int(ticket_id), int(user_id))
+async def delete_ticket(ticket_id: str, user_id: str) -> dict:
+    """
+    Permanently delete a ticket. Supervisor only.
 
-# SECURITY: delete_ticket is implemented above but intentionally excluded from
-# all role tool lists (get_creator_tools, get_resolver_tools, get_supervisor_tools).
-# To enable deletion: add the @tool decorator to delete_ticket and include it
-# in get_supervisor_tools() AFTER an authorization layer is implemented.
+    SECURITY: This function is intentionally excluded from all role tool
+    lists (see :func:`get_supervisor_tools`). To enable deletion:
+    1. Add the ``@tool`` decorator
+    2. Include it in ``get_supervisor_tools()`` AFTER an authorization
+       layer is implemented.
+    """
+    return await _port.delete_ticket(int(ticket_id), int(user_id))
 
 
 # ── Role-keyed tool sets ──────────────────────────────────────────────────────
 
 def get_creator_tools() -> list:
-    """Tools available to users with role 'creador'."""
+    """Tools available to users with role ``'creador'``."""
     return [
         create_ticket,
         get_my_created_tickets,
@@ -386,7 +444,7 @@ def get_creator_tools() -> list:
 
 
 def get_resolver_tools() -> list:
-    """Tools available to users with role 'resueltor'."""
+    """Tools available to users with role ``'resueltor'``."""
     return [
         get_my_assigned_tickets,
         get_ticket_detail,
@@ -397,8 +455,9 @@ def get_resolver_tools() -> list:
 
 def get_supervisor_tools() -> list:
     """
-    Tools available to users with role 'supervisor'.
-    Note: delete_ticket is NOT included — see SECURITY comment above.
+    Tools available to users with role ``'supervisor'``.
+
+    Note: ``delete_ticket`` is NOT included — see SECURITY comment above.
     """
     return [
         get_all_tickets,
