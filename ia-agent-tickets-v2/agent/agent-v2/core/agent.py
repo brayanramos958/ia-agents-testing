@@ -675,9 +675,20 @@ async def get_response(
     try:
         _log.info("LLM call started user=%s thread=%s", user_id, thread_id)
         result = await agent.ainvoke(input_data, config=config)
+        # Record success in circuit breaker for the active provider.
+        # This makes /agent/llm-status show real success/failure stats.
+        from core.circuit_breaker import get_provider_status
+        provider_status = get_provider_status(model)
+        provider_status.record_success()
     except Exception as e:
         _llm_error = repr(e)
         _log.error("LLM call failed user=%s thread=%s error=%s", user_id, thread_id, e, exc_info=True)
+        # Record failure in circuit breaker for the active provider.
+        # After 3 consecutive failures the circuit opens, /agent/llm-status
+        # shows the state, and the operator can see the provider is degraded.
+        from core.circuit_breaker import get_provider_status
+        provider_status = get_provider_status(model)
+        provider_status.record_failure()
         # Record failure for cost/latency tracking
         _llm_collector.record_llm_usage(
             thread_id=thread_id,

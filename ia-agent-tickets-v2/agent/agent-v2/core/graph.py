@@ -122,10 +122,17 @@ def _build_groq_llm():
 
 
 def build_llm():
+    # Pre-register the active provider in the circuit breaker registry so
+    # /agent/llm-status has data to show even before the first LLM call.
+    # This is idempotent — the status is created once and reused.
+    from core.circuit_breaker import get_provider_status
     if settings.llm_provider == "vercel":
+        get_provider_status(settings.ai_gateway_model)
         return _build_vercel_llm()
     if settings.llm_provider == "ollama":
+        get_provider_status(settings.ollama_model)
         return _build_ollama_llm()
+    get_provider_status(settings.llm_model)
     return _build_groq_llm()
 
 

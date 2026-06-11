@@ -46,12 +46,10 @@ async def get_alerts():
     Only supervisors should access this endpoint (role gating is done
     by the Odoo proxy or middleware — this endpoint itself is role-agnostic).
     """
-    if _scheduler is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Alerts system not available — scheduler not initialized.",
-        )
-
+    # No dependency on the background scheduler — the alerts table is queried
+    # directly from PostgreSQL. The scheduler only POPULATES the table; the
+    # endpoint reads it. This separation means alerts endpoint works even if
+    # the scheduler is down.
     try:
         import psycopg
         from config.settings import settings
