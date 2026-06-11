@@ -63,6 +63,13 @@ class Settings(BaseSettings):
     # Minimum confidence to present a solution before creating a ticket
     rag_similarity_threshold: float = 0.6
 
+    # Background RAG sync — keeps the vector store up to date with
+    # newly-resolved tickets from the backend (Odoo / Express).
+    # Default: every 6 hours. Set to 0 to disable periodic sync
+    # (manual sync via /agent/rag/sync is still available).
+    rag_sync_enabled: bool = True
+    rag_sync_interval_hours: int = 6
+
     # ── LLM concurrency ──────────────────────────────────────────────────────
     # Max simultaneous LLM calls before requests wait in line.
     # Prevents saturating the provider (Groq: 30 req/min, Vercel: variable).

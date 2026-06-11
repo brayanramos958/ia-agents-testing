@@ -83,3 +83,31 @@ class IRAGPort(ABC):
     @abstractmethod
     def count(self) -> int:
         """Returns the number of documents currently in the vector store."""
+
+    @abstractmethod
+    async def sync_resolved_tickets(self, ticket_port) -> dict:
+        """
+        Periodic delta sync — pull resolved tickets from ``ticket_port`` and
+        add the ones not yet indexed. Idempotent: tickets already in the
+        vector store (by ``ticket_id``) are skipped.
+
+        Called by the background task in ``main.py:lifespan`` every
+        ``settings.rag_sync_interval_hours`` hours.
+
+        Args:
+            ticket_port: Object exposing ``await get_resolved_tickets()``.
+
+        Returns:
+            dict ``{"added": N, "skipped": M, "errors": K}``.
+        """
+
+    @abstractmethod
+    def cleanup_orphaned_documents(self) -> int:
+        """
+        Delete vector-store rows with empty / null / missing category
+        metadata. These pre-date the category filter (UX-4) and contaminate
+        global searches.
+
+        Returns:
+            Number of documents deleted.
+        """

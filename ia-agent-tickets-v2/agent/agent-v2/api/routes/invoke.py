@@ -14,10 +14,18 @@ Valid intents and their required parameters:
     resolve_ticket      → ticket_id, motivo_resolucion, causa_raiz, user_id
     assign_ticket       → ticket_id, assignee_id, agent_group_id, user_id
     reopen_ticket       → ticket_id, reason, user_id
+    approve_ticket      → ticket_id, user_id
+    reject_ticket       → ticket_id, reason, user_id
     search_solutions    → description, category (optional)
     get_catalog         → catalog_name: types|categories|urgency|impact|priority|stages
+
+ARCHITECTURE NOTE (Fase 8 — async migration):
+    All port methods are async (httpx.AsyncClient). The intent handlers
+    here must `await` them. Returning a coroutine without awaiting causes
+    PydanticSerializationError ("Unable to serialize unknown type: coroutine").
 """
 
+import inspect
 from fastapi import APIRouter, HTTPException
 from api.schemas.invoke import InvokeRequest, InvokeResponse
 from core.context import current_user_id, current_user_role
@@ -26,6 +34,7 @@ import tools.rag_tools as rt
 import tools.user_tools as ut
 
 router = APIRouter()
+
 
 # ── user_id validation ─────────────────────────────────────────────────────
 
@@ -41,49 +50,66 @@ def _validate_body_match(request: InvokeRequest) -> None:
         raise HTTPException(status_code=403,
                             detail=f"role mismatch: token={token_role} body={request.user_rol}")
 
+
 # ── Intent dispatch table ─────────────────────────────────────────────────────
-# Each handler: (parameters: dict, user_id: int) -> any
-# The port (_port) is accessed through the tool module's module-level variable,
-# which was injected at startup via initialize_ports().
+# All handlers are async because the underlying port methods are async (Fase 8).
 
-def _intent_create_ticket(p: dict, uid: int):
-    return tt._port.create_ticket(p, uid)
+async def _intent_create_ticket(p: dict, uid: int):
+    return await tt._port.create_ticket(p, uid)
 
-def _intent_get_tickets(p: dict, uid: int):
-    return tt._port.get_tickets_by_creator(uid)
 
-def _intent_get_assigned(p: dict, uid: int):
-    return tt._port.get_tickets_by_assignee(uid)
+async def _intent_get_tickets(p: dict, uid: int):
+    return await tt._port.get_tickets_by_creator(uid)
 
-def _intent_get_all_tickets(p: dict, uid: int):
-    return tt._port.get_all_tickets(p.get("filters", {}))
 
-def _intent_get_ticket_detail(p: dict, uid: int):
-    return tt._port.get_ticket_detail(
+async def _intent_get_assigned(p: dict, uid: int):
+    return await tt._port.get_tickets_by_assignee(uid)
+
+
+async def _intent_get_all_tickets(p: dict, uid: int):
+    return await tt._port.get_all_tickets(p.get("filters", {}))
+
+
+async def _intent_get_ticket_detail(p: dict, uid: int):
+    return await tt._port.get_ticket_detail(
         p["ticket_id"], uid, p.get("role", "creador")
     )
 
-def _intent_resolve_ticket(p: dict, uid: int):
-    return tt._port.resolve_ticket(
+
+async def _intent_resolve_ticket(p: dict, uid: int):
+    return await tt._port.resolve_ticket(
         p["ticket_id"],
         p["motivo_resolucion"],
         p.get("causa_raiz", ""),
         uid,
     )
 
-def _intent_assign_ticket(p: dict, uid: int):
-    return tt._port.assign_ticket(
+
+async def _intent_assign_ticket(p: dict, uid: int):
+    return await tt._port.assign_ticket(
         p["ticket_id"],
         p["assignee_id"],
         p.get("agent_group_id", 0),
         uid,
     )
 
-def _intent_reopen_ticket(p: dict, uid: int):
-    return tt._port.reopen_ticket(p["ticket_id"], p.get("reason", ""), uid)
 
-def _intent_search_solutions(p: dict, uid: int):
-    result = rt._rag_port.search_similar(
+async def _intent_reopen_ticket(p: dict, uid: int):
+    return await tt._port.reopen_ticket(p["ticket_id"], p.get("reason", ""), uid)
+
+
+async def _intent_approve_ticket(p: dict, uid: int):
+    return await tt._port.approve_ticket(p["ticket_id"], uid)
+
+
+async def _intent_reject_ticket(p: dict, uid: int):
+    return await tt._port.reject_ticket(
+        p["ticket_id"], p.get("reason", ""), uid
+    )
+
+
+async def _intent_search_solutions(p: dict, uid: int):
+    result = await rt._rag_port.search_similar(
         query=p["description"],
         category=p.get("category"),
     )
@@ -102,22 +128,24 @@ def _intent_search_solutions(p: dict, uid: int):
         ],
     }
 
-def _intent_get_catalog(p: dict, uid: int):
+
+async def _intent_get_catalog(p: dict, uid: int):
     name = p.get("catalog_name", "")
     catalogs = {
-        "types":      lambda: ut._port.get_ticket_types(),
+        "types":      ut._port.get_ticket_types,
         "categories": lambda: ut._port.get_categories(p.get("parent_id")),
-        "urgency":    lambda: ut._port.get_urgency_levels(),
-        "impact":     lambda: ut._port.get_impact_levels(),
-        "priority":   lambda: ut._port.get_priority_levels(),
-        "stages":     lambda: ut._port.get_stages(),
-        "groups":     lambda: ut._port.get_agent_groups(),
-        "resolvers":  lambda: ut._port.get_resolvers(),
+        "urgency":    ut._port.get_urgency_levels,
+        "impact":     ut._port.get_impact_levels,
+        "priority":   ut._port.get_priority_levels,
+        "stages":     ut._port.get_stages,
+        "groups":     ut._port.get_agent_groups,
+        "resolvers":  ut._port.get_resolvers,
     }
     handler = catalogs.get(name)
     if not handler:
         raise ValueError(f"Unknown catalog '{name}'. Valid: {list(catalogs.keys())}")
-    return handler()
+    # All port methods are async since Fase 8 — await the coroutine
+    return await handler()
 
 
 INTENT_MAP = {
@@ -129,13 +157,15 @@ INTENT_MAP = {
     "resolve_ticket":   _intent_resolve_ticket,
     "assign_ticket":    _intent_assign_ticket,
     "reopen_ticket":    _intent_reopen_ticket,
+    "approve_ticket":   _intent_approve_ticket,
+    "reject_ticket":    _intent_reject_ticket,
     "search_solutions": _intent_search_solutions,
     "get_catalog":      _intent_get_catalog,
 }
 
 
 @router.post("/agent/invoke", response_model=InvokeResponse)
-def invoke(request: InvokeRequest) -> InvokeResponse:
+async def invoke(request: InvokeRequest) -> InvokeResponse:
     _validate_body_match(request)
 
     handler = INTENT_MAP.get(request.intent)
@@ -151,7 +181,7 @@ def invoke(request: InvokeRequest) -> InvokeResponse:
         )
 
     try:
-        result = handler(request.parameters, request.user_id)
+        result = await handler(request.parameters, request.user_id)
         return InvokeResponse(
             status="success",
             result=result if isinstance(result, dict) else {"data": result},

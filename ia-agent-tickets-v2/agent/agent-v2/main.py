@@ -14,6 +14,7 @@ FastAPI's lifespan context manager.
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import asyncio
 from dotenv import load_dotenv
 
 load_dotenv()  # Must be first — settings reads .env at import time
@@ -42,6 +43,7 @@ _log = get_logger(__name__)
 _ticket_port = None
 _rag_port = None
 _startup_time: float | None = None
+_rag_sync_task = None  # Background RAG sync task handle (set in lifespan)
 
 
 def _build_ticket_port():
@@ -79,6 +81,16 @@ async def _build_rag_port(ticket_port):
     )
 
     if settings.rag_enabled:
+        # Step 1: purge orphaned docs (category='') that pre-date the
+        # UX-4 category filter. Idempotent — safe to run on every startup.
+        try:
+            deleted = store.cleanup_orphaned_documents()
+            if deleted:
+                _log.info("rag_startup_cleanup", extra={"deleted": deleted})
+        except Exception as exc:
+            _log.warning("rag_startup_cleanup_failed", extra={"error": str(exc)})
+
+        # Step 2: initial seed (only when store is empty)
         try:
             # ticket_port is async (Fase 8) — get_resolved_tickets is a coroutine
             resolved = await ticket_port.get_resolved_tickets()
@@ -96,12 +108,56 @@ async def _build_rag_port(ticket_port):
             existing = store.count()
             _log.info("rag_existing_after_failed_seed", extra={"existing_documents": existing})
 
+        # Step 3: delta sync — pick up tickets resolved since the last
+        # full seed (or since the last periodic sync). Idempotent.
+        try:
+            sync_result = await store.sync_resolved_tickets(ticket_port)
+            if sync_result.get("added", 0) > 0:
+                _log.info("rag_startup_sync", extra=sync_result)
+        except Exception as exc:
+            _log.warning("rag_startup_sync_failed", extra={"error": str(exc)})
+
     return store
+
+
+async def _rag_sync_loop(ticket_port, rag_port):
+    """
+    Background task: periodically re-sync the RAG with newly-resolved
+    tickets from the backend. Runs forever (until cancelled) sleeping
+    ``settings.rag_sync_interval_hours`` hours between iterations.
+
+    Why a separate task:
+    - Keeps the vector store alive without manual restarts.
+    - Delta sync (only NEW ticket_ids) is cheap: a single SQL query
+      + a few add_resolved_ticket() calls.
+    - Failures are logged, not raised — sync errors must not crash
+      the agent.
+    """
+    interval_seconds = settings.rag_sync_interval_hours * 3600
+    _log.info(
+        "rag_sync_loop_started",
+        extra={"interval_hours": settings.rag_sync_interval_hours},
+    )
+
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            _log.info("rag_sync_loop_cancelled")
+            raise
+
+        try:
+            result = await rag_port.sync_resolved_tickets(ticket_port)
+            if result.get("added", 0) > 0:
+                _log.info("rag_sync_iteration", extra=result)
+        except Exception as exc:
+            # Never let a sync error kill the loop — log and continue.
+            _log.warning("rag_sync_iteration_failed", extra={"error": str(exc)})
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _ticket_port, _rag_port, _startup_time
+    global _ticket_port, _rag_port, _startup_time, _rag_sync_task
     # ── Startup ──────────────────────────────────────────────────────────────
     configure_logging()
     _log.info("agent_starting", extra={"adapter": settings.backend_adapter, "port": settings.port})
@@ -116,10 +172,34 @@ async def lifespan(app: FastAPI):
 
     initialize_ports(_ticket_port, _rag_port)
 
+    # Start the periodic RAG sync background task.
+    # Disabled when rag_sync_enabled=False or interval=0.
+    if (
+        settings.rag_enabled
+        and settings.rag_sync_enabled
+        and settings.rag_sync_interval_hours > 0
+    ):
+        _rag_sync_task = asyncio.create_task(
+            _rag_sync_loop(_ticket_port, _rag_port)
+        )
+    else:
+        _log.info("rag_sync_disabled", extra={"reason": "config"})
+
     _startup_time = datetime.now(timezone.utc).timestamp()
     _log.info("agent_ready", extra={"uptime_start": _startup_time})
     yield
     # ── Shutdown ─────────────────────────────────────────────────────────────
+    # Cancel the background sync task gracefully.
+    if _rag_sync_task is not None:
+        _rag_sync_task.cancel()
+        try:
+            await _rag_sync_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            _log.warning("rag_sync_task_close_failed", extra={"error": str(exc)})
+        _rag_sync_task = None
+
     # Close the httpx.AsyncClient in the ticket port to release connections
     # and avoid "Unclosed client session" warnings.
     if _ticket_port is not None and hasattr(_ticket_port, "close"):

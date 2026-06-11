@@ -74,15 +74,28 @@ class PGVectorRAGStore(IRAGPort):
         if category:
             full_query = f"Category: {category}. {full_query}"
 
-        try:
-            # similarity_search_with_relevance_scores returns (doc, score) where
-            # score is in [0, 1] (higher = more similar). With COSINE strategy,
-            # score = 1 - pgvector_cosine_distance, so range and threshold are
-            # identical to the old Chroma conversion (1 - dist/2).
-            results = self._store.similarity_search_with_relevance_scores(full_query, k=k)
-        except Exception as exc:
-            _log.warning("pgvector search failed: %s", exc)
-            return SuggestionResult(solutions_found=False)
+        # ── Phase C.2 (UX-4): category-filtered search ────────────────────────
+        # Build pgvector filter when category is provided AND non-empty.
+        # Empty string is treated as "no filter" (some old docs have category="").
+        # PGVector with use_jsonb=True generates: cmetadata->>'category' = $1
+        # which is indexable on the JSONB column for fast pre-filtering.
+        category_filter = None
+        if category and category.strip():
+            category_filter = {"category": category.strip()}
+
+        results = self._search_with_filter(full_query, category_filter, k)
+
+        # ── Fallback: if filter excluded everything, retry without filter ────
+        # Why: the LLM may have misread the catalog and passed a category that
+        # doesn't exist in the knowledge base. Better to return SOMETHING
+        # semantically close than to fail with "no solutions found" when there
+        # are clearly similar resolved tickets in other categories.
+        if not results and category_filter is not None:
+            _log.info(
+                "RAG category filter '%s' returned no results — falling back to global search",
+                category,
+            )
+            results = self._search_with_filter(full_query, None, k)
 
         if not results:
             return SuggestionResult(solutions_found=False)
@@ -113,6 +126,31 @@ class PGVectorRAGStore(IRAGPort):
             solutions=solutions,
             confidence=round(highest_score, 3),
         )
+
+    def _search_with_filter(self, full_query: str,
+                            category_filter: dict | None,
+                            k: int) -> list:
+        """
+        Run a single similarity_search_with_relevance_scores call.
+
+        Returns the raw (doc, score) tuples or empty list on failure.
+        Centralised so the main search_similar() can do its
+        "filter → fallback" pattern in two lines.
+        """
+        try:
+            # similarity_search_with_relevance_scores returns (doc, score) where
+            # score is in [0, 1] (higher = more similar). With COSINE strategy,
+            # score = 1 - pgvector_cosine_distance.
+            if category_filter is not None:
+                return self._store.similarity_search_with_relevance_scores(
+                    full_query, k=k, filter=category_filter,
+                )
+            return self._store.similarity_search_with_relevance_scores(
+                full_query, k=k,
+            )
+        except Exception as exc:
+            _log.warning("pgvector search failed: %s", exc)
+            return []
 
     def add_resolved_ticket(self, ticket_id: int, ticket_name: str,
                             ticket_type: str, category: str,
@@ -222,4 +260,147 @@ class PGVectorRAGStore(IRAGPort):
             return row[0] if row else 0
         except Exception as exc:
             _log.debug("pgvector count failed: %s", exc)
+            return 0
+
+    # ── Delta sync (periodic background task) ─────────────────────────────────
+    # These two methods are the RAG lifecycle hooks for production:
+    #   1. cleanup_orphaned_documents() runs once at startup to purge the
+    #      "noisy" docs that pre-date the category filter.
+    #   2. sync_resolved_tickets(ticket_port) is called every
+    #      ``settings.rag_sync_interval_hours`` to ingest newly-resolved
+    #      tickets without re-indexing the entire history.
+
+    def _indexed_ticket_ids(self) -> set[int]:
+        """Return the set of ticket_id values already embedded in pgvector."""
+        if not self._enabled or not self._store:
+            return set()
+        try:
+            import psycopg
+            with psycopg.connect(settings.postgres_dsn) as conn:
+                rows = conn.execute(
+                    "SELECT (e.cmetadata->>'ticket_id')::int "
+                    "FROM langchain_pg_embedding e "
+                    "JOIN langchain_pg_collection c ON e.collection_id = c.uuid "
+                    "WHERE c.name = %s "
+                    "AND e.cmetadata ? 'ticket_id'",
+                    (self.COLLECTION_NAME,),
+                ).fetchall()
+            return {r[0] for r in rows if r[0] is not None}
+        except Exception as exc:
+            _log.warning("pgvector indexed_ticket_ids failed: %s", exc)
+            return set()
+
+    async def sync_resolved_tickets(self, ticket_port) -> dict:
+        """
+        Pull resolved tickets from ``ticket_port`` and add the ones not yet
+        indexed. Idempotent: tickets already in pgvector (by ``ticket_id``)
+        are skipped, so calling this every N hours does not duplicate work.
+
+        Args:
+            ticket_port: An object exposing ``get_resolved_tickets()`` (async
+                since Fase 8 — the orchestrator awaits the call).
+
+        Returns:
+            dict with ``{"added": N, "skipped": M, "errors": K}`` for logging.
+        """
+        if not self._enabled or not self._store:
+            return {"added": 0, "skipped": 0, "errors": 0, "disabled": True}
+
+        added = 0
+        skipped = 0
+        errors = 0
+
+        try:
+            # ticket_port.get_resolved_tickets is async (Fase 8)
+            resolved = await ticket_port.get_resolved_tickets()
+        except Exception as exc:
+            _log.warning("rag_sync_fetch_failed: %s", exc)
+            return {"added": 0, "skipped": 0, "errors": 1}
+
+        # Build the set of IDs already in pgvector once (cheap SQL query)
+        indexed = self._indexed_ticket_ids()
+
+        for ticket in (resolved or []):
+            ticket_id = ticket.get("ticket_id", 0)
+            if not ticket_id:
+                continue
+            if int(ticket_id) in indexed:
+                skipped += 1
+                continue
+
+            # Skip tickets with empty category — they would be deleted by
+            # cleanup_orphaned_documents() anyway, so adding them would
+            # create a sync ↔ cleanup loop that wastes embedding compute.
+            raw_category = ticket.get("category", "") or ticket.get("categoria", "")
+            if not raw_category or not str(raw_category).strip():
+                skipped += 1
+                continue
+
+            try:
+                ok = self.add_resolved_ticket(
+                    ticket_id=ticket_id,
+                    ticket_name=ticket.get("ticket_name", ""),
+                    ticket_type=ticket.get("ticket_type", "") or ticket.get("tipo_requerimiento", ""),
+                    category=ticket.get("category", "") or ticket.get("categoria", ""),
+                    description=ticket.get("description", "") or ticket.get("descripcion", ""),
+                    motivo_resolucion=ticket.get("motivo_resolucion", "") or ticket.get("resolucion", ""),
+                    causa_raiz=ticket.get("causa_raiz", ""),
+                )
+                if ok:
+                    added += 1
+                    # Track in our local set so duplicates within this
+                    # same batch are not double-counted.
+                    indexed.add(int(ticket_id))
+                else:
+                    errors += 1
+            except Exception as exc:
+                _log.warning(
+                    "rag_sync_add_failed",
+                    extra={"ticket_id": ticket_id, "error": str(exc)},
+                )
+                errors += 1
+
+        result = {"added": added, "skipped": skipped, "errors": errors}
+        if added > 0 or errors > 0:
+            _log.info("rag_sync_done", extra=result)
+        return result
+
+    def cleanup_orphaned_documents(self) -> int:
+        """
+        Delete pgvector rows with empty / null / missing ``category`` metadata.
+
+        These documents pre-date the category-filter feature (UX-4) and
+        contaminate global searches. Safe to call repeatedly — it is a
+        pure DELETE with no side effects on valid documents.
+
+        Returns:
+            Number of documents deleted.
+        """
+        if not self._enabled or not self._store:
+            return 0
+        try:
+            import psycopg
+            with psycopg.connect(settings.postgres_dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        DELETE FROM langchain_pg_embedding e
+                        USING langchain_pg_collection c
+                        WHERE e.collection_id = c.uuid
+                          AND c.name = %s
+                          AND (
+                            NOT (e.cmetadata ? 'category')
+                            OR e.cmetadata->>'category' IS NULL
+                            OR TRIM(e.cmetadata->>'category') = ''
+                          )
+                        """,
+                        (self.COLLECTION_NAME,),
+                    )
+                    deleted = cur.rowcount
+                conn.commit()
+            if deleted:
+                _log.info("rag_cleanup_done", extra={"deleted": deleted})
+            return deleted
+        except Exception as exc:
+            _log.warning("pgvector cleanup failed: %s", exc)
             return 0
