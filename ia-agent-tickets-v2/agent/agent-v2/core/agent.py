@@ -740,7 +740,15 @@ async def get_response(
             and msg.content
             and not getattr(msg, "tool_calls", None)
         ):
-            return msg.content
+            # Security Capa 5: redact PII in LLM output before returning
+            from core.pii_redaction import redact_pii
+            redacted, redaction_count = redact_pii(msg.content)
+            if redaction_count > 0:
+                _log.info(
+                    "pii_redacted user=%s thread=%s count=%d",
+                    user_id, thread_id, redaction_count,
+                )
+            return redacted
 
     return (
         "No pude procesar tu solicitud en este momento. "
@@ -814,7 +822,13 @@ async def stream_response(
                 chunk = event["data"]["chunk"]
                 # Skip tool_call_chunks — only stream final text tokens
                 if chunk.content and not getattr(chunk, "tool_call_chunks", None):
-                    yield f"data: {json.dumps({'t': 'token', 'v': chunk.content})}\n\n"
+                    # Security Capa 5: best-effort PII redaction per chunk.
+                    # Note: streaming means PII may be split across chunks
+                    # (e.g. "user@" then "example.com"). The complete redaction
+                    # happens in get_response() for the non-streaming endpoint.
+                    from core.pii_redaction import redact_pii
+                    redacted, _ = redact_pii(chunk.content)
+                    yield f"data: {json.dumps({'t': 'token', 'v': redacted})}\n\n"
 
             # ── Tool execution started — send UX hint ────────────────────────
             elif kind == "on_tool_start":
