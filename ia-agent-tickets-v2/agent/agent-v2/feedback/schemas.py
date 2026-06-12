@@ -5,7 +5,7 @@ IMPORTANT: This is NOT ticket CSAT (customer satisfaction).
 This measures how helpful the AI agent was during the interaction.
 
 - Ticket CSAT → managed natively by the enterprise system (satisfaction_rating field)
-- AI feedback → stored here in feedback.db
+- AI feedback → stored in PostgreSQL (see feedback/collector.py)
 """
 
 from pydantic import BaseModel, Field

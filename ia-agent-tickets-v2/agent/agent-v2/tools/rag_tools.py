@@ -139,7 +139,7 @@ async def suggest_solution(description: Any, category: Any = "") -> str:
             k=5,
         )
 
-    # ── Record RAG usage in feedback.db (Phase 2) ───────────────────────────
+    # ── Record RAG usage in PostgreSQL (Phase 2) ───────────────────────────
     elapsed_ms = (time.perf_counter() - started) * 1000
     try:
         await asyncio.to_thread(

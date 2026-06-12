@@ -124,18 +124,18 @@ class Settings(BaseSettings):
 
     # ── Conversation persistence ─────────────────────────────────────────────
     # "memory"   → InMemorySaver (lost on restart, dev only)
-    # "sqlite"   → AsyncSqliteSaver (persists across restarts, single-worker dev)
     # "postgres" → AsyncPostgresSaver (production — required for multi-user concurrency)
-    checkpoint_backend: str = "sqlite"
-    checkpoint_db_path: str = "./checkpoints.db"
-    # PostgreSQL DSN — required when checkpoint_backend=postgres
+    # NOTE 2026-06-11: SQLite checkpoint support removed. The default is now
+    # PostgreSQL (the checkpointer and the RAG share the same DSN).
+    checkpoint_backend: str = "postgres"
+    # PostgreSQL DSN — used for both the checkpointer and the RAG.
     # Format: postgresql://user:password@host:5432/dbname
     postgres_dsn: str = ""
 
     # ── AI feedback (separate from ticket CSAT) ──────────────────────────────
     # Stores ratings of the AI assistant's helpfulness — NOT ticket satisfaction.
     # Ticket CSAT is handled natively by the enterprise system (satisfaction_rating).
-    feedback_db_path: str = "./feedback.db"
+    # Lives in PostgreSQL (same DSN as RAG + checkpointer) — see feedback/collector.py.
 
     # ── Server ───────────────────────────────────────────────────────────────
     port: int = 8001  # Port 8000 is reserved for agent-v1

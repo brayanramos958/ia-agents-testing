@@ -1,10 +1,9 @@
 #!/bin/bash
 # ──────────────────────────────────────────────────────────────────────────────
-# SARA v2 — Backup diario de PostgreSQL + SQLite
+# SARA v2 — Backup diario de PostgreSQL
 #
 # Qué backupea:
-#   - PostgreSQL: checkpoints de conversaciones + alertas SLA
-#   - SQLite:     feedback.db (ratings IA) + checkpoints.db (si se usa sqlite)
+#   - PostgreSQL: checkpoints de conversaciones + alertas SLA + feedback + RAG
 #
 # Dónde: ./backups/postgres_YYYY-MM-DD_HHMMSS.sql.gz
 #
@@ -13,7 +12,6 @@
 #
 # Requisitos:
 #   - Contenedor sara-postgres-prod corriendo
-#   - Contenedor sara-agent-prod corriendo (para SQLite via docker cp)
 #   - docker sin sudo (usuario en grupo docker)
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -27,7 +25,6 @@ RETENTION_DAYS=7  # Mantener últimos 7 días
 
 # Nombres de contenedores (deben coincidir con docker-compose.prod.yml)
 PG_CONTAINER="sara-postgres-prod"
-AGENT_CONTAINER="sara-agent-prod"
 
 # Credenciales PostgreSQL (deben coincidir con docker-compose.prod.yml)
 PG_USER="${POSTGRES_USER:-helpdesk_agent}"
@@ -45,7 +42,7 @@ echo "════════════════════════�
 
 # ── 1. Backup PostgreSQL ─────────────────────────────────────────────────────
 echo ""
-echo "[1/3] PostgreSQL (pg_dump)..."
+echo "[1/2] PostgreSQL (pg_dump)..."
 
 if docker inspect "$PG_CONTAINER" --format '{{.State.Running}}' 2>/dev/null | grep -q true; then
     BACKUP_FILE="$BACKUP_DIR/postgres_${TIMESTAMP}.sql.gz"
@@ -65,36 +62,13 @@ else
     FAILED=1
 fi
 
-# ── 2. Backup SQLite (feedback.db) ──────────────────────────────────────────
+# ── 2. Rotación — eliminar backups más viejos que RETENTION_DAYS ────────────
 echo ""
-echo "[2/3] SQLite (feedback.db)..."
-
-if docker exec "$AGENT_CONTAINER" test -f "/app/data/feedback.db" 2>/dev/null; then
-    docker cp "$AGENT_CONTAINER:/app/data/feedback.db" "$BACKUP_DIR/feedback_${TIMESTAMP}.db" 2>/dev/null
-    echo "  ✓ feedback.db → feedback_${TIMESTAMP}.db"
-else
-    echo "  ℹ feedback.db not found in container (vacío o no inicializado)"
-fi
-
-# ── 3. Backup SQLite (checkpoints.db) ────────────────────────────────────────
-echo ""
-echo "[3/3] SQLite (checkpoints.db)..."
-
-if docker exec "$AGENT_CONTAINER" test -f "/app/data/checkpoints.db" 2>/dev/null; then
-    docker cp "$AGENT_CONTAINER:/app/data/checkpoints.db" "$BACKUP_DIR/checkpoints_${TIMESTAMP}.db" 2>/dev/null
-    echo "  ✓ checkpoints.db → checkpoints_${TIMESTAMP}.db"
-else
-    echo "  ℹ checkpoints.db not found (normal si checkpoint_backend=postgres)"
-fi
-
-# ── 4. Rotación — eliminar backups más viejos que RETENTION_DAYS ────────────
-echo ""
-echo "[Rotación] Limpiando backups de más de ${RETENTION_DAYS} días..."
+echo "[2/2] Rotación — limpiando backups de más de ${RETENTION_DAYS} días..."
 
 DELETED_SQL=$(find "$BACKUP_DIR" -name "postgres_*.sql.gz" -mtime +$RETENTION_DAYS -delete -print 2>/dev/null | wc -l)
-DELETED_DB=$(find "$BACKUP_DIR" -name "*.db" -mtime +$RETENTION_DAYS -delete -print 2>/dev/null | wc -l)
 
-echo "  Eliminados: ${DELETED_SQL} SQL + ${DELETED_DB} SQLite"
+echo "  Eliminados: ${DELETED_SQL} SQL"
 
 # ── Resumen ────────────────────────────────────────────────────────────────
 echo ""

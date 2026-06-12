@@ -23,11 +23,15 @@ async def get_metrics():
     """
     Returns aggregate metrics about SARA's performance.
 
+    Designed for the Odoo metrics dashboard (sara_metrics_action.js).
+    All percentages are 0-100 (not 0-1) for easier display.
+
     Sections:
-        feedback   — feedback.db based metrics
-        operation  — Odoo/Express backend operation KPIs (Phase 1)
-        rag        — RAG usage tracking (Phase 2 — placeholder)
-        llm        — LLM usage tracking (Phase 3 — placeholder)
+        summary    — KPI cards: top 5 numbers the dashboard shows
+        feedback   — user satisfaction & deflection
+        operation  — helpdesk KPIs (MTTR, MTTA, SLA)
+        rag        — knowledge base quality
+        llm        — AI usage & cost
     """
     # ── Feedback section ────────────────────────────────────────────────────
     try:
@@ -44,60 +48,74 @@ async def get_metrics():
     created = type_map.get("ticket_created", {}).get("count", 0)
     total = suggested + created
     deflection_rate = (suggested / total) if total > 0 else 0.0
+    avg_satisfaction = feedback_metrics.get("average_rating", 0.0)
 
     feedback_section = {
         "total_feedback": feedback_metrics.get("total_feedback", 0),
-        "avg_satisfaction": feedback_metrics.get("average_rating", 0.0),
+        "avg_satisfaction": round(avg_satisfaction, 2),
         "tickets_created": created,
         "tickets_deflected": suggested,
-        "deflection_rate": round(deflection_rate, 4),
+        "deflection_rate_pct": round(deflection_rate * 100, 2),
         "by_type": by_type,
     }
 
-    # ── Operation section (Phase 1) ─────────────────────────────────────────
+    # ── Operation section ─────────────────────────────────────────
     operation_section = {
         "avg_time_to_assign_hours": 0.0,
         "avg_time_to_resolve_hours": 0.0,
         "tickets_by_category": [],
         "tickets_by_urgency": [],
+        "tickets_by_status": {},
         "approval_rate": {"approved": 0, "rejected": 0, "pending": 0},
-        "reopen_rate": 0.0,
+        "sla_breach_count": 0,
+        "sla_at_risk_count": 0,
+        "reopen_rate_pct": 0.0,
+        "total_open_tickets": 0,
+        "total_resolved_tickets": 0,
     }
-    # Import lazily so we get the runtime-initialized _port (not the module-level None).
     from tools.ticket_tools import _port as _runtime_port
     if _runtime_port is not None:
         try:
-            # _runtime_port is now fully async (Fase 8) — direct await.
-            # asyncio.gather() inside get_operation_metrics runs 7 Odoo calls in parallel.
             op_metrics = await _runtime_port.get_operation_metrics()
             operation_section.update(op_metrics)
+            # Normalise reopen_rate to percentage if backend returns 0-1
+            if isinstance(operation_section.get("reopen_rate"), float):
+                operation_section["reopen_rate_pct"] = round(operation_section["reopen_rate"] * 100, 2)
         except Exception as exc:
             logger.warning("Failed to collect operation metrics: %s", exc)
             operation_section["_error"] = str(exc)
 
-    # ── RAG section (Phase 2) ───────────────────────────────────────────────
+    # ── RAG section ───────────────────────────────────────────────
     try:
         rag_section = collector.get_rag_summary()
+        # Normalise hit_rate to percentage if backend returns 0-1
+        if isinstance(rag_section.get("rag_hit_rate"), float):
+            rag_section["rag_hit_rate_pct"] = round(rag_section["rag_hit_rate"] * 100, 2)
+        else:
+            rag_section["rag_hit_rate_pct"] = 0.0
     except Exception as exc:
         logger.warning("Failed to collect RAG metrics: %s", exc)
         rag_section = {
             "rag_hit_rate": None,
+            "rag_hit_rate_pct": 0.0,
             "rag_total_calls": 0,
             "rag_hits": 0,
             "rag_avg_score": None,
             "rag_avg_latency_ms": None,
         }
 
-    # ── LLM section (Phase 3) ───────────────────────────────────────────────
+    # ── LLM section ───────────────────────────────────────────────
     try:
         llm_section = collector.get_llm_summary()
-        # Always include active provider/model for context
         llm_section["provider"] = settings.llm_provider
         llm_section["model"] = (
             settings.ai_gateway_model
             if settings.llm_provider == "vercel"
             else settings.llm_model
         )
+        # Normalise cost to 2 decimals
+        if "total_cost_usd" in llm_section:
+            llm_section["total_cost_usd"] = round(llm_section["total_cost_usd"], 2)
     except Exception as exc:
         logger.warning("Failed to collect LLM metrics: %s", exc)
         llm_section = {
@@ -113,7 +131,21 @@ async def get_metrics():
             ),
         }
 
+    # ── Summary section (top 5 KPIs for the dashboard) ──────────────────────────
+    summary_section = {
+        "satisfaction_pct": round(avg_satisfaction * 100 / 5, 2),  # 5-star scale
+        "deflection_pct": round(deflection_rate * 100, 2),
+        "rag_hit_rate_pct": rag_section.get("rag_hit_rate_pct", 0.0),
+        "avg_resolution_hours": operation_section.get("avg_time_to_resolve_hours", 0.0),
+        "sla_breach_count": operation_section.get("sla_breach_count", 0),
+        "total_cost_usd": llm_section.get("total_cost_usd", 0.0),
+        "total_llm_calls": llm_section.get("total_calls", 0),
+        "total_open_tickets": operation_section.get("total_open_tickets", 0),
+        "total_resolved_tickets": operation_section.get("total_resolved_tickets", 0),
+    }
+
     return {
+        "summary": summary_section,
         "feedback": feedback_section,
         "operation": operation_section,
         "rag": rag_section,

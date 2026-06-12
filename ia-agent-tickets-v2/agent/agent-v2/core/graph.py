@@ -11,7 +11,6 @@ Supported LLM providers (LLM_PROVIDER):
   ollama → Ollama local server (development)
 
 Supported checkpoint backends:
-  sqlite   → AsyncSqliteSaver   (dev / single-worker)
   postgres → AsyncPostgresSaver (production / multi-user concurrency)
   memory   → MemorySaver        (dev / no persistence)
 """
@@ -144,23 +143,12 @@ async def init_checkpointer() -> None:
     arrives. The connection stays open for the lifetime of the process.
 
     Backends:
-      sqlite   → AsyncSqliteSaver via aiosqlite (dev / single-worker)
       postgres → AsyncPostgresSaver via psycopg pool (production)
       *        → MemorySaver (in-memory, lost on restart)
     """
     global _checkpointer_instance
 
-    if settings.checkpoint_backend == "sqlite":
-        import aiosqlite
-        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-
-        conn = await aiosqlite.connect(settings.checkpoint_db_path)
-        checkpointer = AsyncSqliteSaver(conn)
-        await checkpointer.setup()
-        _checkpointer_instance = checkpointer
-        _log.info("checkpointer_ready", extra={"backend": "sqlite", "path": settings.checkpoint_db_path})
-
-    elif settings.checkpoint_backend == "postgres":
+    if settings.checkpoint_backend == "postgres":
         if not settings.postgres_dsn:
             raise RuntimeError(
                 "CHECKPOINT_BACKEND=postgres requires POSTGRES_DSN to be set in .env.\n"

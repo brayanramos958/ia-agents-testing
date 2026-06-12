@@ -12,7 +12,7 @@ RUN uv sync --frozen --no-dev
 # Copy application code
 COPY . .
 
-# Create volume mount point for persistent feedback DB
+# Ensure directory exists for optional audit log (falls back to stdout if unavailable)
 RUN mkdir -p /app/data
 
 # Health check for container orchestration — validates app is alive AND all
