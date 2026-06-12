@@ -14,6 +14,7 @@ from api.middleware.rate_limit import check_rate_limit
 from api.middleware.injection_detector import scan_message  # Security Capa 2
 from core.agent import get_or_create_agent, get_response
 from core.context import current_thread_id, current_user_id, current_user_role
+from core.events import emit
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -54,6 +55,16 @@ async def chat(request: ChatRequest) -> ChatResponse:
     detection = scan_message(request.message, request.user_id, thread_id)
     if detection.blocked:
         raise HTTPException(status_code=400, detail=f"Mensaje bloqueado: {detection.reason}")
+
+    # Usage tracking (Fase 1.5) — fire-and-forget via event bus
+    # metrics.usage_tracker subscribes to "user.chat_started" and "user.message_sent"
+    session_id = thread_id  # session_id = thread_id (one conversation = one session)
+    emit("user.chat_started",
+         user_id=request.user_id, user_role=request.user_rol,
+         thread_id=thread_id, session_id=session_id)
+    emit("user.message_sent",
+         user_id=request.user_id, user_role=request.user_rol,
+         thread_id=thread_id, session_id=session_id)
 
     try:
         agent = get_or_create_agent(request.user_rol)

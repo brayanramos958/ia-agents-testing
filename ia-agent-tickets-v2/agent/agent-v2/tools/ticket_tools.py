@@ -22,6 +22,8 @@ from typing import Optional, Union
 from langchain_core.tools import tool
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from core.context import current_thread_id as _thread_id_var
+from core.events import emit
 from core.security import frame_external_data
 from ports.rag_port import IRAGPort
 from ports.ticket_port import ITicketPort
@@ -159,6 +161,22 @@ async def create_ticket(
         element_id: L3 category ID (optional).
         system_equipment: Device or software name affected (optional).
     """
+    # ── Fase 1.6: Emit creation_started event (decoupled from metrics) ────
+    from core.context import current_user_id as _uid_var, current_user_role as _role_var
+    uid_for_event = _uid_var.get() or _safe_uid(user_id)
+    role_for_event = _role_var.get("creador")
+    thread_for_event = _thread_id_var.get(None)
+
+    # Metrics listens for "ticket.creation_started" and creates its own row.
+    # We don't know the creation_event_id here — metrics generates it.
+    emit(
+        "ticket.creation_started",
+        user_id=uid_for_event,
+        user_role=role_for_event,
+        thread_id=thread_for_event,
+        session_id=thread_for_event,
+    )
+
     payload = {
         "asunto": asunto,
         "descripcion": descripcion,
@@ -171,7 +189,30 @@ async def create_ticket(
         "priority_id":    await _resolve_id(priority_id,    "priority_id",    _port.get_priority_levels),
         "system_equipment": system_equipment,
     }
-    return await _port.create_ticket(payload, _safe_uid(user_id))
+    try:
+        result = await _port.create_ticket(payload, _safe_uid(user_id))
+    except Exception as exc:
+        # ── Fase 1.6: Emit creation_abandoned event on exception ──────────────
+        emit("ticket.creation_abandoned", user_id=uid_for_event, thread_id=thread_for_event)
+        raise
+
+    # ── Fase 1.6: Emit creation_completed event on success ──────────────────
+    if isinstance(result, dict) and result.get("success"):
+        ticket_id = result.get("ticket_id") or result.get("id")
+        ticket_name = result.get("name") or result.get("ticket_name") or ""
+        duplicate_of = result.get("duplicate_of_ticket_id")  # OdooAdapter may set this (UX-4)
+        emit(
+            "ticket.creation_completed",
+            user_id=uid_for_event,
+            ticket_id=int(ticket_id) if ticket_id else 0,
+            ticket_name=str(ticket_name),
+            duplicate_of_ticket_id=duplicate_of,
+        )
+    else:
+        # success=False or unexpected shape — mark as abandoned
+        emit("ticket.creation_abandoned", user_id=uid_for_event, thread_id=thread_for_event)
+
+    return result
 
 
 @tool

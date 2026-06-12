@@ -1,11 +1,17 @@
 """
 GET /agent/metrics — SARA usage dashboard (MON-1).
 
-Returns key metrics in three sections:
+Returns key metrics in five sections:
     feedback   — agent evaluation (rating, deflection, satisfaction)
     operation  — helpdesk KPIs (MTTN, MTTR, distribution by category/urgency)
     rag        — RAG usage (hit rate, avg score) — Phase 2
     llm        — LLM usage (tokens, latency, cost) — Phase 3
+    summary    — KPI cards: top 5 numbers the dashboard shows
+    adoption   — usage & unique users (Fase 1.5)
+    creation   — ticket creation flow (Fase 1.6)
+
+Fase 1.7: each section now includes _metadata with description, unit,
+and SLO targets (queried from metrics_registry).
 """
 
 import logging
@@ -13,6 +19,10 @@ from fastapi import APIRouter, HTTPException
 
 from config.settings import settings
 from feedback.collector import FeedbackCollector
+from metrics.audit import log_request
+from metrics.creation_tracker import get_creation_summary
+from metrics.registry import MetricsRegistry
+from metrics.usage_tracker import get_adoption_summary
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -32,7 +42,11 @@ async def get_metrics():
         operation  — helpdesk KPIs (MTTR, MTTA, SLA)
         rag        — knowledge base quality
         llm        — AI usage & cost
+        adoption   — usage & unique users (Fase 1.5)
+        creation   — ticket creation flow (Fase 1.6)
     """
+    # Audit log (Fase 1.7)
+    log_request(endpoint="/agent/metrics", query_params={})
     # ── Feedback section ────────────────────────────────────────────────────
     try:
         collector = FeedbackCollector()
@@ -144,10 +158,136 @@ async def get_metrics():
         "total_resolved_tickets": operation_section.get("total_resolved_tickets", 0),
     }
 
+    # ── Adoption section (Fase 1.5) ──────────────────────────────────────────
+    adoption_section = await _get_adoption_metrics()
+
+    # ── Creation section (Fase 1.6) ──────────────────────────────────────────
+    creation_section = await _get_creation_metrics()
+
+    # ── Metadata (Fase 1.7) ──────────────────────────────────────────────────
+    metadata = _build_metadata(summary_section, feedback_section, operation_section,
+                                rag_section, llm_section, adoption_section, creation_section)
+
     return {
         "summary": summary_section,
         "feedback": feedback_section,
         "operation": operation_section,
         "rag": rag_section,
         "llm": llm_section,
+        "adoption": adoption_section,
+        "creation": creation_section,
+        "metadata": metadata,
+    }
+
+
+async def _get_adoption_metrics() -> dict:
+    """Compute adoption metrics (Fase 1.5)."""
+    try:
+        return get_adoption_summary()
+    except Exception as exc:
+        logger.warning("Failed to collect adoption metrics: %s", exc)
+        return {
+            "usage_daily_count": 0,
+            "usage_weekly_count": 0,
+            "unique_users_daily": 0,
+            "unique_users_weekly": 0,
+            "unique_users_monthly": 0,
+            "retention_rate_7d_pct": 0.0,
+            "activation_rate_pct": 0.0,
+            "sessions_per_user_avg": 0.0,
+            "power_users_count": 0,
+            "dormant_users_count": 0,
+        }
+
+
+async def _get_creation_metrics() -> dict:
+    """Compute creation metrics (Fase 1.6)."""
+    try:
+        return get_creation_summary()
+    except Exception as exc:
+        logger.warning("Failed to collect creation metrics: %s", exc)
+        return {
+            "tickets_created_daily": 0,
+            "tickets_created_weekly": 0,
+            "avg_creation_time_seconds": 0.0,
+            "median_creation_time_seconds": 0.0,
+            "p95_creation_time_seconds": 0.0,
+            "tickets_abandoned_count": 0,
+            "tickets_abandoned_rate_pct": 0.0,
+            "tickets_created_in_first_message_pct": 0.0,
+            "avg_messages_per_ticket": 0.0,
+            "duplicate_detection_rate_pct": 0.0,
+            "satisfaction_avg": 0.0,
+            "satisfaction_pct": 0.0,
+            "total_ratings_count": 0,
+        }
+
+
+def _build_metadata(*sections: dict) -> dict:
+    """
+    Build a metadata map for each section: which key metrics have
+    descriptions, units, and SLO targets.
+
+    Fase 1.7: trazabilidad de cada número.
+    """
+    try:
+        registry = MetricsRegistry()
+        catalog = {m["metric_name"]: m for m in registry.get_all()}
+    except Exception:
+        catalog = {}
+
+    def _meta_for(key: str) -> dict:
+        m = catalog.get(key)
+        if not m:
+            return {}
+        return {
+            "description": m["description"],
+            "unit": m["unit"],
+            "slo_target": m["slo_target"],
+            "slo_alert_threshold": m["slo_alert_threshold"],
+        }
+
+    return {
+        "summary": {
+            "satisfaction_pct": _meta_for("satisfaction_pct"),
+            "deflection_pct": _meta_for("deflection_pct"),
+            "rag_hit_rate_pct": _meta_for("rag_hit_rate_pct"),
+            "avg_resolution_hours": _meta_for("avg_resolution_hours"),
+            "sla_breach_count": _meta_for("sla_breach_count"),
+            "total_cost_usd": _meta_for("total_cost_usd"),
+            "total_llm_calls": _meta_for("total_llm_calls"),
+            "total_open_tickets": _meta_for("total_open_tickets"),
+            "total_resolved_tickets": _meta_for("total_resolved_tickets"),
+        },
+        "feedback": {
+            "total_feedback": _meta_for("total_feedback"),
+            "avg_satisfaction": _meta_for("avg_satisfaction"),
+            "tickets_created": _meta_for("tickets_created"),
+            "tickets_deflected": _meta_for("tickets_deflected"),
+            "deflection_rate_pct": _meta_for("deflection_rate_pct"),
+        },
+        "rag": {
+            "rag_total_calls": _meta_for("rag_total_calls"),
+            "rag_hits": _meta_for("rag_hits"),
+            "rag_hit_rate": _meta_for("rag_hit_rate"),
+            "rag_avg_score": _meta_for("rag_avg_score"),
+            "rag_avg_latency_ms": _meta_for("rag_avg_latency_ms"),
+        },
+        "llm": {
+            "total_calls": _meta_for("llm_total_calls"),
+            "total_tokens": _meta_for("llm_total_tokens"),
+            "avg_latency_ms": _meta_for("llm_avg_latency_ms"),
+            "fallback_count": _meta_for("llm_fallback_count"),
+            "fallback_rate": _meta_for("llm_fallback_rate"),
+            "error_count": _meta_for("llm_error_count"),
+            "error_rate": _meta_for("llm_error_rate"),
+        },
+        "adoption": {
+            "description": "Adoption & usage metrics (Fase 1.5) — how much and who uses SARA",
+            "unit": "mixed",
+        },
+        "creation": {
+            "description": "Ticket creation flow metrics (Fase 1.6) — time and satisfaction",
+            "unit": "mixed",
+        },
     }

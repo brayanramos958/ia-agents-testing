@@ -55,7 +55,25 @@ def _validate_body_match(request: InvokeRequest) -> None:
 # All handlers are async because the underlying port methods are async (Fase 8).
 
 async def _intent_create_ticket(p: dict, uid: int):
-    return await tt._port.create_ticket(p, uid)
+    """
+    Delegate to the create_ticket TOOL (not the port directly) so that
+    Fase 1.6 creation tracking (start/complete/abandon) fires.
+    The tool also handles catalog ID resolution via _resolve_id().
+    """
+    # Resolve optional fields to None if absent (LangChain tool needs explicit None)
+    return await tt.create_ticket.ainvoke({
+        "asunto":           p.get("asunto", ""),
+        "descripcion":      p.get("descripcion", ""),
+        "ticket_type_id":   p.get("ticket_type_id"),
+        "category_id":      p.get("category_id"),
+        "urgency_id":       p.get("urgency_id"),
+        "impact_id":        p.get("impact_id"),
+        "priority_id":      p.get("priority_id"),
+        "user_id":          uid,
+        "subcategory_id":   p.get("subcategory_id"),
+        "element_id":       p.get("element_id"),
+        "system_equipment": p.get("system_equipment", ""),
+    })
 
 
 async def _intent_get_tickets(p: dict, uid: int):

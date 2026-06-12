@@ -31,6 +31,7 @@ from api.routes.invoke import router as invoke_router
 from api.routes.stream import router as stream_router
 from api.routes.auth import router as auth_router
 from api.routes.metrics import router as metrics_router
+from api.routes.metrics_extended import router as metrics_extended_router
 from api.routes.llm_status import router as llm_status_router
 from api.routes.alerts import router as alerts_router
 from core.agent import initialize_ports
@@ -245,6 +246,7 @@ app.include_router(invoke_router)
 app.include_router(stream_router)
 app.include_router(auth_router)
 app.include_router(metrics_router)
+app.include_router(metrics_extended_router)
 app.include_router(llm_status_router)
 app.include_router(alerts_router)
 
