@@ -13,6 +13,7 @@ stream_response()         — async generator: yields SSE tokens via astream_eve
 import json
 import logging
 import asyncio
+import os
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langgraph.prebuilt import create_react_agent
 from langgraph.prebuilt.tool_node import ToolNode
@@ -45,11 +46,10 @@ def _get_llm_semaphore() -> asyncio.Semaphore:
 # In multi-worker production: uses PostgreSQL cache (shared across workers).
 # In single-process dev: falls back to in-memory dict (avoids PostgreSQL round-trip).
 
-import os
 _USE_SHARED_CACHE = bool(os.environ.get("AGENT_USE_SHARED_CACHE", "1") == "1")
 
 _creator_context_cache: dict = {}  # In-memory fallback (dev only)
-_CREATOR_CONTEXT_CACHE_MAX = 500  # threads to keep in memory
+_CREATOR_CONTEXT_CACHE_MAX = settings.context_cache_max_size  # threads to keep in memory
 _shared_cache = None  # PostgreSQL cache instance (lazy init)
 
 
@@ -147,7 +147,9 @@ async def _fetch_creator_context(user_id: int, thread_id: str) -> str:
                 if len(open_tickets) > 3:
                     lines.append(f"(+{len(open_tickets)-3} mas)")
                 result = "\n".join(lines)
-    except Exception as exc:
+    except (psycopg.Error, ConnectionError, TimeoutError) as exc:
+        # Pre-fetch is best-effort. If the backend or DB is unreachable,
+        # we return an empty string and let the LLM proceed without context.
         _log.debug("Could not pre-fetch user tickets for context: %s", exc)
         result = ""
 
@@ -197,7 +199,7 @@ def invalidate_creator_context(thread_id: str) -> None:
 # Avoids the resolver having to call get_my_assigned_tickets on every message.
 
 _resolver_context_cache: dict = {}  # In-memory fallback (dev only)
-_RESOLVER_CONTEXT_CACHE_MAX = 500
+_RESOLVER_CONTEXT_CACHE_MAX = settings.context_cache_max_size
 
 
 async def _fetch_resolver_context(user_id: int, thread_id: str) -> str:
@@ -270,7 +272,9 @@ async def _fetch_resolver_context(user_id: int, thread_id: str) -> str:
             if len(tickets) > 8:
                 lines.append(f"(+{len(tickets)-8} mas)")
             result = "\n".join(lines)
-    except Exception as exc:
+    except (psycopg.Error, ConnectionError, TimeoutError) as exc:
+        # Pre-fetch is best-effort. If the backend or DB is unreachable,
+        # we return an empty string and let the LLM proceed without context.
         _log.debug("Could not pre-fetch resolver tickets: %s", exc)
         result = ""
 
@@ -287,6 +291,19 @@ async def _fetch_resolver_context(user_id: int, thread_id: str) -> str:
     return result
 
 
+# ── Late imports (intentionally placed here, NOT at the top of the file) ─────
+# These modules form a dependency graph with core/agent.py:
+#   tools/* → ports/* → core/*
+#   core/agent.py → tools/* (for get_creator_tools etc.)
+#
+# If we import them at the top, we get a circular dependency:
+#   core/agent → tools/ticket_tools → core/agent (at import time)
+#
+# Python resolves this by deferring the imports until after the helper
+# functions above are defined. By that point, the module-level setup in
+# core/agent.py is complete and the circular chain breaks cleanly.
+#
+# DO NOT MOVE THESE TO THE TOP — it will break the import order.
 from ports.ticket_port import ITicketPort
 from ports.rag_port import IRAGPort
 from core.graph import build_llm, build_checkpointer
@@ -388,7 +405,7 @@ def create_agent(tools: list):
 
     pre_model_hook (_trim_hook):
     - Mantiene solo el SystemMessage más reciente (evita acumulación entre turnos).
-    - Limita el historial a los últimos 12 mensajes no-sistema.
+    - Limita el historial a los últimos 8 mensajes no-sistema.
     - Repara ToolMessages huérfanos y vacíos que Groq rechaza.
     """
     from langchain_core.messages import SystemMessage as _SM, AIMessage as _AI, ToolMessage as _TM
@@ -404,7 +421,7 @@ def create_agent(tools: list):
         2. ToolMessages huérfanos: si el trim corta un AIMessage con tool_calls
            pero deja sus ToolMessages correspondientes, Groq los rechaza (400).
         3. ToolMessage con content vacío: Groq requiere string no vacío.
-        4. Crecimiento ilimitado del contexto: limita a 12 mensajes no-sistema.
+        4. Crecimiento ilimitado del contexto: limita a 8 mensajes no-sistema.
         """
         from langchain_core.messages import HumanMessage as _HM
         msgs = state["messages"]
@@ -416,8 +433,9 @@ def create_agent(tools: list):
         system = [all_system[-1]] if all_system else []
         non_system = [m for m in msgs if not isinstance(m, _SM)]
 
-        # Paso 1: corta a los últimos 8
-        window = non_system[-8:] if len(non_system) > 8 else non_system
+        # Paso 1: corta a los últimos N mensajes (configurable via settings.chat_history_trim_limit)
+        trim_limit = settings.chat_history_trim_limit
+        window = non_system[-trim_limit:] if len(non_system) > trim_limit else non_system
 
         # Paso 2: detecta ToolMessages huérfanos al inicio de la ventana.
         # Un TM es huérfano si no hay ningún AIMessage con tool_calls antes de él.
@@ -537,7 +555,9 @@ async def _prepare_invocation(
                 config = {"configurable": {"thread_id": fresh_thread}, "recursion_limit": 30}
                 # Also clear the stale creator context for the old thread
                 invalidate_creator_context(thread_id)
-    except Exception as _state_err:
+    except psycopg.Error as _state_err:
+        # Checkpointer DB unreachable — proceed without orphan detection.
+        # This is best-effort: the next successful get_state will catch it.
         _log.debug("Could not inspect thread state: %s", _state_err)
 
     input_data = {
@@ -607,7 +627,9 @@ def _extract_usage(result: dict) -> tuple[int, int]:
             or 0
         )
         return int(tokens_in), int(tokens_out)
-    except Exception:
+    except (AttributeError, TypeError, KeyError, ValueError):
+        # Metadata format varies across LLM providers. Return zeros
+        # so the caller can proceed without token tracking.
         return 0, 0
 
 
@@ -680,7 +702,10 @@ async def get_response(
         from core.circuit_breaker import get_provider_status
         provider_status = get_provider_status(model)
         provider_status.record_success()
-    except Exception as e:
+    except (TimeoutError, ConnectionError, RuntimeError, ValueError) as e:
+        # LLM calls can fail for many provider-specific reasons (rate limit,
+        # auth, schema rejection, tool-call parse error). These are the
+        # most common — anything else propagates so we can fix it.
         _llm_error = repr(e)
         _log.error("LLM call failed user=%s thread=%s error=%s", user_id, thread_id, e, exc_info=True)
         # Record failure in circuit breaker for the active provider.
@@ -740,7 +765,9 @@ async def get_response(
                     payload = _json.loads(msg.content) if isinstance(msg.content, str) else msg.content
                     if isinstance(payload, dict) and payload.get("success"):
                         invalidate_creator_context(thread_id)
-                except Exception:
+                except (json.JSONDecodeError, TypeError, AttributeError):
+                    # Tool returned non-JSON or unexpected format — skip
+                    # cache invalidation. The next call will re-fetch.
                     pass
                 break
 
@@ -855,7 +882,9 @@ async def stream_response(
                             output = json.loads(output)
                         if isinstance(output, dict) and output.get("success"):
                             invalidate_creator_context(thread_id)
-                    except Exception:
+                    except (json.JSONDecodeError, TypeError, AttributeError):
+                        # Tool returned non-JSON or unexpected format — skip
+                        # cache invalidation. The next call will re-fetch.
                         pass
 
             # ── LLM finished — capture the final AIMessage for usage ────────
@@ -867,6 +896,10 @@ async def stream_response(
         yield f"data: {json.dumps({'t': 'done'})}\n\n"
 
     except Exception as exc:
+        # Stream generator boundary: catch ALL exceptions and emit them as
+        # SSE error events so the client can render a graceful error message
+        # instead of seeing a broken stream. This is the right place to
+        # catch broadly — we are the API edge.
         _stream_error = repr(exc)
         _log.exception("stream_response error thread=%s user=%s", thread_id, user_id)
         yield f"data: {json.dumps({'t': 'error', 'v': str(exc)})}\n\n"

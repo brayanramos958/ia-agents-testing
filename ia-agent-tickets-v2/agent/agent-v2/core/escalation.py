@@ -32,8 +32,8 @@ class EscalationReminder:
       - Zero LLM token cost — pure SQL + Odoo ORM.
     """
 
-    AGENT_THRESHOLD_HOURS = 4       # Notify agent after 4h without activity
-    SUPERVISOR_THRESHOLD_HOURS = 6  # Notify supervisor after 6h total
+    AGENT_THRESHOLD_HOURS = settings.escalation_agent_hours        # Notify agent after N hours without activity
+    SUPERVISOR_THRESHOLD_HOURS = settings.escalation_supervisor_hours  # Notify supervisor after N hours total
 
     def __init__(self, ticket_port):
         self._port = ticket_port
@@ -54,9 +54,10 @@ class EscalationReminder:
             return 0
 
         try:
-            tickets = await self._port.get_all_tickets(filters=None, limit=200)
-        except Exception:
-            _log.debug("Escalation scan: backend unreachable — skipping")
+            tickets = await self._port.get_all_tickets(filters=None, limit=settings.escalation_scan_limit)
+        except (ConnectionError, TimeoutError) as exc:
+            # Backend unreachable or slow — skip this scan, retry on next tick.
+            _log.debug("Escalation scan: backend unreachable — skipping (%s)", exc)
             return 0
 
         now = datetime.now(timezone.utc)
@@ -216,7 +217,8 @@ async def _send_agent_reminder(
             "Level 1 reminder: %s → agent %s (%dh idle)",
             ticket_name, assignee_id, idle_hours,
         )
-    except Exception as exc:
+    except (psycopg.Error, ConnectionError) as exc:
+        # DB or backend error — log and continue. Next scan will retry.
         _log.warning(
             "Failed to send agent reminder for %s: %s", ticket_name, exc,
         )
@@ -249,7 +251,8 @@ async def _send_supervisor_escalation(
             "Level 2 escalation: %s → supervisor notified (%dh idle)",
             ticket_name, idle_hours,
         )
-    except Exception as exc:
+    except (psycopg.Error, ConnectionError) as exc:
+        # DB or backend error — log and continue. Next scan will retry.
         _log.warning(
             "Failed to escalate %s: %s", ticket_name, exc,
         )
@@ -276,5 +279,5 @@ async def ensure_escalation_tables(pg_dsn: str) -> None:
             """)
             await conn.commit()
             _log.debug("escalation_reminders table verified.")
-    except Exception:
-        _log.warning("Could not create escalation_reminders table.")
+    except psycopg.Error as exc:
+        _log.warning("Could not create escalation_reminders table: %s", exc)

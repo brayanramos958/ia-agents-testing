@@ -148,6 +148,40 @@ agent-v2/
 - **Módulo Odoo `ITS_Helpdesk_Docst_no_editable/`**: NO TOCAR. Es el módulo de producción real.
 - **Tests**: `uv run python scratch/test_sara.py --port 8001 --delay 5`
 
+## Estándares de código
+
+### Error handling
+- **Nunca** usar `except Exception` genérico en código de negocio. Usar siempre excepciones específicas:
+  - DB: `except psycopg.Error`
+  - Network: `except (ConnectionError, TimeoutError)`
+  - LLM calls: `except (TimeoutError, ConnectionError, RuntimeError, ValueError)`
+  - Parseo de JSON: `except (json.JSONDecodeError, TypeError, AttributeError)`
+- **Excepción justificada**: `except Exception` solo es aceptable en:
+  1. **Event bus** (`core/events.py`) — los listeners deben estar aislados
+  2. **API boundary SSE** (`core/agent.py::stream_response`) — convertir todo error a evento SSE
+  3. **Background tasks best-effort** (template seeding) — con log informativo
+  - En estos casos, dejar comentario explicando por qué es justificado.
+
+### Configuración
+- **Sin magic numbers** en código de negocio. Valores numéricos en `config/settings.py`:
+  - `context_cache_max_size: int = 500` — tamaño máx del cache in-memory
+  - `chat_history_trim_limit: int = 8` — mensajes no-sistema retenidos en contexto
+  - `escalation_agent_hours: int = 4` — horas antes de notificar al agente
+  - `escalation_supervisor_hours: int = 6` — horas antes de escalar a supervisor
+  - `escalation_scan_limit: int = 200` — tickets escaneados por ciclo
+
+### Imports
+- Imports en orden PEP 8: stdlib, third-party, local.
+- **Excepción**: `core/agent.py` tiene "late imports" (líneas 294-305 aprox.) por circular dependency con `tools/*` y `ports/*`. NO MOVER — están documentados con comentario.
+
+### Async
+- En contexto async, usar `asyncio.get_running_loop()` (no `get_event_loop()` que está deprecated en 3.12+).
+- Funciones sync que llaman a async: usar `get_event_loop()` está bien si se llaman desde código sync.
+
+### Type hints
+- Type hints completos en funciones públicas (Python 3.10+).
+- Docstrings en formato Google para funciones no triviales.
+
 ---
 
 ## Estado actual y pendientes
@@ -164,6 +198,7 @@ Ver `agent_v2_Doc/PLAN.md` para el estado completo.
 - Seguridad Capa 1 (anti-prompt-injection en prompts) y Capa 4 (ContextVar user_id)
 - OdooAdapter implementado (no probado contra Odoo real)
 - Docker dev con hot reload
+- **Code cleanup (Fase 3)**: 26× `except Exception` reemplazados por específicos. Magic numbers extraídos a `settings.py`. Late imports documentados.
 
 ### Pendiente (prioridad)
 - **RAG-1**: Poblar vector store con tickets históricos reales

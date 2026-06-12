@@ -93,7 +93,7 @@ class SARAScheduler:
                 await self._scan_sla_alerts()
             except asyncio.CancelledError:
                 break
-            except Exception:
+            except (psycopg.Error, ConnectionError):
                 _log.exception("SLA scan failed")
             await asyncio.sleep(self._interval)
 
@@ -108,7 +108,7 @@ class SARAScheduler:
                 await self._scan_escalation()
             except asyncio.CancelledError:
                 break
-            except Exception:
+            except (psycopg.Error, ConnectionError):
                 _log.exception("Escalation scan failed")
             await asyncio.sleep(self._escalation_interval)
 
@@ -168,8 +168,8 @@ class SARAScheduler:
         try:
             from core.escalation import ensure_escalation_tables
             await ensure_escalation_tables(self._pg_dsn)
-        except Exception:
-            _log.warning("Escalation table creation skipped.")
+        except psycopg.Error as exc:
+            _log.warning("Escalation table creation skipped: %s", exc)
 
         # Seed template data from catalog (idempotent)
         try:
@@ -177,8 +177,10 @@ class SARAScheduler:
             inserted = await seed_templates(self._port)
             if inserted > 0:
                 _log.info("Seeded %d ticket template(s)", inserted)
-        except Exception:
-            _log.warning("Template seeding skipped — backend may not be ready yet.")
+        except Exception as exc:
+            # Template seeding can fail for many reasons (backend not ready,
+            # missing catalog, etc.) — keep broad catch here, just log.
+            _log.warning("Template seeding skipped: %s", exc)
 
     # ── SLA scan ────────────────────────────────────────────────────────────
 
@@ -198,8 +200,8 @@ class SARAScheduler:
         """
         try:
             tickets = await self._port.get_all_tickets(filters=None, limit=200)
-        except Exception:
-            _log.debug("SLA scan: backend unreachable — skipping cycle")
+        except (ConnectionError, TimeoutError) as exc:
+            _log.debug("SLA scan: backend unreachable — skipping cycle (%s)", exc)
             return 0
 
         if not tickets:
@@ -286,8 +288,8 @@ class SARAScheduler:
                 )
                 count = (await row.fetchone())[0]
             return count
-        except Exception:
-            _log.debug("Could not query sla_alerts — table may not exist yet")
+        except psycopg.Error as exc:
+            _log.debug("Could not query sla_alerts — table may not exist yet (%s)", exc)
             return 0
 
 

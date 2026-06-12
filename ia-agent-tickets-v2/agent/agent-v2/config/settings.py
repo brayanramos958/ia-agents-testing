@@ -141,6 +141,25 @@ class Settings(BaseSettings):
     port: int = 8001  # Port 8000 is reserved for agent-v1
     cors_origins: List[str] = ["*"]
 
+    # ── Agent core tuning ────────────────────────────────────────────────────
+    # Maximum threads kept in the in-memory creator/resolver context cache.
+    # When the cache reaches this size, the oldest entry is evicted.
+    # Only used in single-process dev (multi-worker uses PostgreSQL cache).
+    context_cache_max_size: int = 500
+
+    # Number of non-system messages to keep in the LLM context window.
+    # Older messages are trimmed by the pre_model_hook to prevent unbounded growth.
+    # See core/agent.py::_trim_hook for the trimming logic.
+    chat_history_trim_limit: int = 8
+
+    # ── Escalation thresholds (background scheduler) ────────────────────────
+    # Hours of inactivity before a reminder is sent to the assigned agent.
+    escalation_agent_hours: int = 4
+    # Hours of inactivity before the supervisor is notified.
+    escalation_supervisor_hours: int = 6
+    # Maximum tickets scanned per escalation check (avoids loading the whole table).
+    escalation_scan_limit: int = 200
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

@@ -41,7 +41,7 @@ class UserInfoResponse(BaseModel):
 
 
 @router.post("/auth/login", response_model=LoginResponse)
-def login(request: LoginRequest):
+async def login(request: LoginRequest):
     """
     Authenticate against Odoo and return a JWT token.
 
@@ -53,7 +53,8 @@ def login(request: LoginRequest):
     try:
         from adapters.odoo_adapter import OdooAdapter
         adapter = OdooAdapter()
-        user = adapter.authenticate_user(request.username, request.password)
+        # authenticate_user is async (Fase 8) - must be awaited
+        user = await adapter.authenticate_user(request.username, request.password)
     except ValueError as exc:
         raise HTTPException(status_code=401, detail=str(exc))
     except Exception as exc:

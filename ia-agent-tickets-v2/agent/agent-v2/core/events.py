@@ -98,8 +98,11 @@ def emit(event_name: str, **kwargs: Any) -> None:
                 # Track errors so they don't get silently lost
                 task.add_done_callback(_log_task_error)
             else:
-                # Sync listener — run in thread pool to avoid blocking
-                asyncio.get_event_loop().run_in_executor(
+                # Sync listener — run in thread pool to avoid blocking.
+                # Use get_running_loop() to avoid DeprecationWarning in Python 3.12+.
+                # The except RuntimeError below handles the "no loop running" case.
+                loop = asyncio.get_running_loop()
+                loop.run_in_executor(
                     None, _safe_call, listener, kwargs
                 )
         except RuntimeError as exc:

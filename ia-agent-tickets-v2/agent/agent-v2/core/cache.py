@@ -100,7 +100,7 @@ class PostgreSQLCache:
                     await conn.commit()
                 self._schema_ready = True
                 logger.info("agent_cache_schema_ready")
-            except Exception as exc:
+            except psycopg.Error as exc:
                 logger.error("agent_cache_schema_failed: %s", exc)
                 # Don't raise — cache failures should not block agent startup.
                 # Subsequent operations will retry schema creation.
@@ -126,7 +126,7 @@ class PostgreSQLCache:
                     )
                     row = await cur.fetchone()
                     return row[0] if row else None
-        except Exception as exc:
+        except psycopg.Error as exc:
             logger.warning("agent_cache_get_failed key=%s: %s", key, exc)
             return None  # Cache failures are non-fatal
 
@@ -156,7 +156,7 @@ class PostgreSQLCache:
                     )
                 await conn.commit()
             return True
-        except Exception as exc:
+        except psycopg.Error as exc:
             logger.warning("agent_cache_set_failed key=%s: %s", key, exc)
             return False
 
@@ -179,7 +179,7 @@ class PostgreSQLCache:
                     )
                 await conn.commit()
             return True
-        except Exception as exc:
+        except psycopg.Error as exc:
             logger.warning("agent_cache_delete_failed key=%s: %s", key, exc)
             return False
 
@@ -200,7 +200,7 @@ class PostgreSQLCache:
                     deleted = cur.rowcount
                 await conn.commit()
             return deleted
-        except Exception as exc:
+        except psycopg.Error as exc:
             logger.warning("agent_cache_clear_expired_failed: %s", exc)
             return -1
 
@@ -220,6 +220,6 @@ class PostgreSQLCache:
                     )
                     row = await cur.fetchone()
                     return int(row[0]) if row else 0
-        except Exception as exc:
+        except psycopg.Error as exc:
             logger.warning("agent_cache_size_failed: %s", exc)
             return -1
