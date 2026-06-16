@@ -274,17 +274,29 @@ async def resolve_ticket(
     ticket_id_int = int(ticket_id)
     result = await _port.resolve_ticket(ticket_id_int, motivo_resolucion, causa_raiz, uid)
 
+    # RAG update is best-effort — must never cause the tool to report failure
+    # when the ticket was already resolved successfully in Odoo.
     if result.get("success") and _rag_port:
-        ticket = await _port.get_ticket_detail(ticket_id_int, uid, "resueltor")
-        await _rag_port.add_resolved_ticket(
-            ticket_id=ticket_id_int,
-            ticket_name=ticket.get("name") or f"TCK-{ticket_id_int:04d}",
+        try:
+            ticket = await _port.get_ticket_detail(ticket_id_int, uid, "resueltor")
+            await _rag_port.add_resolved_ticket(
+                ticket_id=ticket_id_int,
+                ticket_name=ticket.get("name") or f"TCK-{ticket_id_int:04d}",
             ticket_type=ticket.get("ticket_type") or ticket.get("tipo_requerimiento", ""),
             category=ticket.get("category") or ticket.get("categoria", ""),
             description=ticket.get("descripcion", ""),
             motivo_resolucion=motivo_resolucion,
             causa_raiz=causa_raiz,
         )
+        except Exception as _rag_err:
+            # RAG update is non-critical: the ticket was already resolved
+            # successfully in Odoo. Log and continue.
+            import logging
+            _rag_log = logging.getLogger(__name__)
+            _rag_log.warning(
+                "resolve_ticket: RAG update failed (ticket=%s), continuing: %s",
+                ticket_id_int, _rag_err,
+            )
 
     return result
 

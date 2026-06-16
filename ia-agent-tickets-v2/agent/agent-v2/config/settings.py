@@ -97,7 +97,7 @@ class Settings(BaseSettings):
     # ── Shared cache (Fase 8 — multi-worker) ────────────────────────────────
     # TTL for creator/resolver context cache entries in PostgreSQL.
     # 3600 = 1 hour. Use 1800 for shorter freshness, 7200 for less DB load.
-    cache_ttl_seconds: int = 3600
+    cache_ttl_seconds: int = 300  # 5 minutes — stale context is worse than extra Odoo call
 
     # ── Rate limiting ────────────────────────────────────────────────────────
     # Per-user sliding-window limit (requests per 60 seconds).
