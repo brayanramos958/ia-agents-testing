@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SARA — Métricas Plus</title>
+    <link rel="stylesheet" href="/metrics-plus/style.css">
+</head>
+<body>
+    <div class="sara-metrics-wrapper">
+        <!-- Header -->
+        <div class="sara-metrics-header">
+            <h2>SARA — Métricas Plus</h2>
+            <div class="sara-header-actions">
+                <span class="sara-last-update" data-last-update>Última actualización: —</span>
+                <button class="btn btn-primary sara-refresh-btn">🔄 Actualizar</button>
+            </div>
+        </div>
+
+        <!-- LLM config bar (top) -->
+        <div class="sara-llm-config" data-llm-config>
+            <div class="sara-llm-loading">Cargando config LLM…</div>
+        </div>
+
+        <!-- 8 KPI cards principales -->
+        <div class="sara-metrics-kpis">
+            <div class="sara-kpi-card" data-kpi="satisfaction_pct">
+                <div class="sara-kpi-label">Satisfacción %</div>
+                <div class="sara-kpi-value">—</div>
+            </div>
+            <div class="sara-kpi-card" data-kpi="deflection_pct">
+                <div class="sara-kpi-label">Deflection %</div>
+                <div class="sara-kpi-value">—</div>
+            </div>
+            <div class="sara-kpi-card" data-kpi="rag_hit_rate_pct">
+                <div class="sara-kpi-label">RAG Hit Rate</div>
+                <div class="sara-kpi-value">—</div>
+            </div>
+            <div class="sara-kpi-card" data-kpi="avg_resolution_hours">
+                <div class="sara-kpi-label">MTTR (horas)</div>
+                <div class="sara-kpi-value">—</div>
+            </div>
+            <div class="sara-kpi-card" data-kpi="sla_breach_count">
+                <div class="sara-kpi-label">SLA Breaches</div>
+                <div class="sara-kpi-value">—</div>
+            </div>
+            <div class="sara-kpi-card sara-kpi-cost" data-kpi="total_cost_usd">
+                <div class="sara-kpi-label">Costo LLM</div>
+                <div class="sara-kpi-value">—</div>
+            </div>
+            <div class="sara-kpi-card" data-kpi="unique_users_monthly">
+                <div class="sara-kpi-label">MAU</div>
+                <div class="sara-kpi-value">—</div>
+            </div>
+            <div class="sara-kpi-card" data-kpi="tickets_abandoned_count">
+                <div class="sara-kpi-label">Abandonos</div>
+                <div class="sara-kpi-value">—</div>
+            </div>
+        </div>
+
+        <!-- Grid de secciones (8) -->
+        <div class="sara-metrics-grid">
+
+            <!-- 1) LLM -->
+            <div class="sara-metrics-section">
+                <h3>🤖 LLM (tokens, costo, latencia)</h3>
+                <div class="sara-llm-details" data-llm-details>
+                    <div class="sara-loading">Cargando…</div>
+                </div>
+            </div>
+
+            <!-- 2) RAG -->
+            <div class="sara-metrics-section">
+                <h3>🔍 RAG (knowledge base)</h3>
+                <div class="sara-rag-details" data-rag-details>
+                    <div class="sara-loading">Cargando…</div>
+                </div>
+            </div>
+
+            <!-- 3) Operación -->
+            <div class="sara-metrics-section">
+                <h3>📊 Operación (MTTN, MTTR, reopen)</h3>
+                <div class="sara-op-details" data-op-details>
+                    <div class="sara-loading">Cargando…</div>
+                </div>
+            </div>
+
+            <!-- 4) Feedback -->
+            <div class="sara-metrics-section">
+                <h3>⭐ Feedback (satisfacción)</h3>
+                <div class="sara-feedback-details" data-feedback-details>
+                    <div class="sara-loading">Cargando…</div>
+                </div>
+            </div>
+
+            <!-- 5) Adoption -->
+            <div class="sara-metrics-section">
+                <h3>👥 Adoption (DAU/WAU/MAU/Retention)</h3>
+                <div class="sara-adoption-details" data-adoption-details>
+                    <div class="sara-loading">Cargando…</div>
+                </div>
+            </div>
+
+            <!-- 6) Creation -->
+            <div class="sara-metrics-section">
+                <h3>🎫 Creation (time-to-create, abandonos)</h3>
+                <div class="sara-creation-details" data-creation-details>
+                    <div class="sara-loading">Cargando…</div>
+                </div>
+            </div>
+
+            <!-- 7) Catalog (las 34 métricas) -->
+            <div class="sara-metrics-section sara-section-wide">
+                <h3>📚 Catálogo de métricas (<span data-catalog-count>34</span>)</h3>
+                <div class="sara-catalog-details" data-catalog-details>
+                    <div class="sara-loading">Cargando…</div>
+                </div>
+            </div>
+
+            <!-- 8) Audit log -->
+            <div class="sara-metrics-section sara-section-wide">
+                <h3>🔒 Audit log (últimos eventos)</h3>
+                <div class="sara-audit-details" data-audit-details>
+                    <div class="sara-loading">Cargando…</div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <script src="/metrics-plus/app.js"></script>
+</body>
+</html>

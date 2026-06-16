@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>SARA — Diagnóstico Métricas Plus</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; }
+        .ok { color: green; }
+        .error { color: red; }
+        .info { color: blue; }
+        pre { background: #f5f5f5; padding: 10px; overflow: auto; }
+    </style>
+</head>
+<body>
+    <h1>Diagnóstico — Métricas Plus</h1>
+    <div id="log"></div>
+    
+    <script>
+        const API_KEY = 'dev-key-change-in-prod';
+        const AGENT_BASE = 'http://localhost:8001';
+        const log = document.getElementById('log');
+        
+        function add(msg, cls) {
+            const d = document.createElement('div');
+            d.className = cls || 'info';
+            d.innerHTML = msg;
+            log.appendChild(d);
+        }
+        
+        add('Iniciando diagnóstico...', 'info');
+        add(`Agente base: ${AGENT_BASE}`, 'info');
+        add(`API Key: ${API_KEY ? '***configurada***' : 'FALTA'}`, API_KEY ? 'ok' : 'error');
+        
+        // Test 1: Health
+        add('<h3>Test 1: Health del agente</h3>', 'info');
+        fetch(`${AGENT_BASE}/health`)
+            .then(r => r.json())
+            .then(d => add(`✅ Health: ${d.status} (uptime: ${d.uptime_seconds}s)`, 'ok'))
+            .catch(e => add(`❌ Health failed: ${e.message}`, 'error'));
+        
+        // Test 2: Metrics con API Key
+        add('<h3>Test 2: /agent/metrics con X-Agent-Key</h3>', 'info');
+        fetch(`${AGENT_BASE}/agent/metrics`, {
+            headers: { 'X-Agent-Key': API_KEY }
+        })
+            .then(r => {
+                add(`HTTP Status: ${r.status}`, r.ok ? 'ok' : 'error');
+                return r.json();
+            })
+            .then(d => {
+                const sections = Object.keys(d);
+                add(`✅ Secciones: ${sections.join(', ')}`, 'ok');
+                add(`Summary: satisfaction=${d.summary?.satisfaction_pct}%`, 'ok');
+            })
+            .catch(e => add(`❌ Metrics failed: ${e.message}`, 'error'));
+        
+        // Test 3: Catalog
+        add('<h3>Test 3: /agent/metrics/catalog</h3>', 'info');
+        fetch(`${AGENT_BASE}/agent/metrics/catalog`, {
+            headers: { 'X-Agent-Key': API_KEY }
+        })
+            .then(r => r.json())
+            .then(d => add(`✅ Métricas catalogadas: ${d.total || 0}`, 'ok'))
+            .catch(e => add(`❌ Catalog failed: ${e.message}`, 'error'));
+        
+        // Test 4: Verificar que el dashboard HTML carga
+        add('<h3>Test 4: Dashboard HTML</h3>', 'info');
+        fetch(`${AGENT_BASE}/metrics-plus`)
+            .then(r => {
+                add(`HTTP Status: ${r.status}`, r.ok ? 'ok' : 'error');
+                return r.text();
+            })
+            .then(t => {
+                add(`HTML size: ${t.length} bytes`, 'ok');
+                add(`Contiene SARA: ${t.includes('SARA')}`, 'ok');
+            })
+            .catch(e => add(`❌ Dashboard failed: ${e.message}`, 'error'));
+    </script>
+</body>
+</html>

@@ -34,6 +34,7 @@ from api.routes.metrics import router as metrics_router
 from api.routes.metrics_extended import router as metrics_extended_router
 from api.routes.llm_status import router as llm_status_router
 from api.routes.alerts import router as alerts_router
+from api.routes.metrics_dashboard import router as metrics_dashboard_router
 from core.agent import initialize_ports
 from core.graph import init_checkpointer
 from core.logging import configure_logging, get_logger
@@ -249,6 +250,7 @@ app.include_router(metrics_router)
 app.include_router(metrics_extended_router)
 app.include_router(llm_status_router)
 app.include_router(alerts_router)
+app.include_router(metrics_dashboard_router)
 
 
 # ── Health check (REAL — verifies ALL components) ────────────────────────────

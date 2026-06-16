@@ -18,10 +18,13 @@ from fastapi.responses import JSONResponse
 from config.settings import settings
 
 EXCLUDED_PATHS = {"/health", "/docs", "/openapi.json", "/redoc", "/auth/login"}
+# Paths that are excluded by PREFIX (e.g. /metrics-plus serves HTML + static assets)
+EXCLUDED_PREFIXES = ("/metrics-plus",)
 
 
 async def api_key_middleware(request: Request, call_next):
-    if request.url.path.rstrip("/") in EXCLUDED_PATHS:
+    path = request.url.path.rstrip("/")
+    if path in EXCLUDED_PATHS or any(path.startswith(p) for p in EXCLUDED_PREFIXES):
         return await call_next(request)
 
     # If a Bearer token is present, JWT middleware handles auth — skip API key check

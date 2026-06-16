@@ -29,11 +29,19 @@ from core.context import current_user_id, current_user_role
 _log = logging.getLogger("sara.auth")
 
 # Paths that don't require JWT
-_PUBLIC_PATHS = {"/health", "/docs", "/openapi.json", "/redoc", "/auth/login"}
+# /metrics-plus is the dashboard HTML + static assets. Public so the user
+# can open it from Odoo; the JS sends X-Agent-Key on each /agent/metrics fetch.
+_PUBLIC_PATHS = {"/health", "/docs", "/openapi.json", "/redoc", "/auth/login", "/metrics-plus"}
 
 
 def _is_public(path: str) -> bool:
+    # Use exact match for short paths, prefix match for the dashboard.
     for p in _PUBLIC_PATHS:
+        if p == "/metrics-plus":
+            # Only match the dashboard and its static assets, not /agent/metrics
+            if path == "/metrics-plus" or path.startswith("/metrics-plus/"):
+                return True
+            continue
         if path == p or path.startswith(p):
             return True
     return False

@@ -1,0 +1,134 @@
+/* SARA Métricas Plus — mismo estilo visual que el dashboard "Métricas SARA" */
+* { box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background: #f5f5f5;
+    margin: 0;
+    padding: 0;
+    color: #333;
+}
+
+.sara-metrics-wrapper {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+/* Header */
+.sara-metrics-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+.sara-metrics-header h2 { margin: 0; color: #4a6cf7; font-size: 24px; }
+.sara-header-actions { display: flex; align-items: center; gap: 16px; }
+.sara-last-update { font-size: 12px; color: #666; }
+.sara-refresh-btn {
+    background: #4a6cf7; color: #fff; border: 0; padding: 8px 16px;
+    border-radius: 4px; cursor: pointer; font-size: 14px;
+}
+.sara-refresh-btn:hover { background: #3a5ce7; }
+.sara-refresh-btn:disabled { background: #999; cursor: wait; }
+
+/* LLM config bar (morado, igual que el dashboard original) */
+.sara-llm-config {
+    background: linear-gradient(135deg, #4a6cf7 0%, #6a82fb 100%);
+    color: #fff; padding: 12px 20px; border-radius: 6px;
+    margin-bottom: 20px; display: flex; gap: 32px; align-items: center; flex-wrap: wrap;
+}
+.sara-llm-item { font-size: 13px; }
+.sara-llm-item strong { font-size: 16px; display: block; margin-top: 2px; }
+.sara-llm-label { font-size: 11px; opacity: 0.85; text-transform: uppercase; }
+.sara-llm-loading { color: rgba(255,255,255,0.8); font-style: italic; }
+
+/* KPI cards (8) */
+.sara-metrics-kpis {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+}
+.sara-kpi-card {
+    background: #f8f9fa;
+    border-left: 4px solid #4a6cf7;
+    padding: 16px;
+    border-radius: 4px;
+}
+.sara-kpi-card.sara-kpi-cost { border-left-color: #28a745; }
+.sara-kpi-label {
+    font-size: 12px; color: #666; text-transform: uppercase; letter-spacing: 0.5px;
+}
+.sara-kpi-value {
+    font-size: 26px; font-weight: bold; color: #333; margin-top: 4px;
+}
+
+/* Grid de secciones */
+.sara-metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    gap: 16px;
+}
+.sara-section-wide { grid-column: 1 / -1; }
+
+.sara-metrics-section {
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+    padding: 16px;
+}
+.sara-metrics-section h3 {
+    margin-top: 0; color: #333; border-bottom: 1px solid #eee;
+    padding-bottom: 8px; font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px;
+}
+
+/* Detalles dentro de cada sección */
+.sara-detail-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 6px 0; border-bottom: 1px solid #f5f5f5; font-size: 13px;
+}
+.sara-detail-row:last-child { border-bottom: 0; }
+.sara-detail-label { color: #666; }
+.sara-detail-value { color: #333; font-weight: 600; }
+.sara-detail-value-good { color: #28a745; font-weight: 600; }
+.sara-detail-value-warn { color: #ffc107; font-weight: 600; }
+.sara-detail-value-bad { color: #dc3545; font-weight: 600; }
+
+/* Catalog list */
+.sara-catalog-item {
+    padding: 8px 0; border-bottom: 1px solid #f0f0f0; font-size: 13px;
+    display: grid; grid-template-columns: 1fr 100px 100px; gap: 12px; align-items: center;
+}
+.sara-catalog-item:last-child { border-bottom: 0; }
+.sara-catalog-name { font-weight: 600; color: #4a6cf7; }
+.sara-catalog-desc { color: #666; font-size: 12px; margin-top: 2px; }
+.sara-catalog-category {
+    background: #e8ecff; color: #4a6cf7; padding: 2px 8px; border-radius: 10px;
+    font-size: 11px; font-weight: 600; text-align: center;
+}
+.sara-catalog-slo {
+    text-align: right; font-size: 12px; color: #28a745; font-weight: 600;
+}
+
+/* Audit list */
+.sara-audit-item {
+    padding: 6px 0; border-bottom: 1px solid #f0f0f0; font-size: 12px;
+    display: grid; grid-template-columns: 150px 1fr 100px; gap: 12px; align-items: center;
+}
+.sara-audit-item:last-child { border-bottom: 0; }
+.sara-audit-time { color: #999; font-family: monospace; }
+.sara-audit-action { color: #333; }
+.sara-audit-user { color: #4a6cf7; text-align: right; font-weight: 600; }
+
+.sara-loading { color: #999; font-style: italic; font-size: 13px; }
+.sara-error { color: #dc3545; font-size: 13px; }
+
+/* Responsive */
+@media (max-width: 768px) {
+    .sara-metrics-grid { grid-template-columns: 1fr; }
+    .sara-catalog-item, .sara-audit-item { grid-template-columns: 1fr; }
+    .sara-llm-config { gap: 16px; }
+}
