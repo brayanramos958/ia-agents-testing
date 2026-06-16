@@ -235,16 +235,41 @@ class OdooAdapter(ITicketPort):
         user = user_data[0]
         groups = user.get("groups_id", [])
 
-        # Determine role from group membership
-        role = "creador"  # default
+        # Determine role from group membership using group IDs (stable across
+        # Odoo version upgrades and language changes). See:
+        #   ITS_Helpdesk_base/security/security.xml
+        #     group_helpdesk_client    -> id 335 "Helpdesk Solicitante"  -> creador
+        #     group_helpdesk_agent     -> id 334 "Helpdesk Agente"       -> resueltor
+        #     group_helpdesk_manager   -> id 333 "Helpdesk Gestor"       -> supervisor
+        #     group_helpdesk_admin     -> id 332 "Helpdesk Admin"        -> supervisor
+        HELPDESK_GROUP_IDS = {
+            335: "creador",      # Helpdesk Solicitante
+            334: "resueltor",    # Helpdesk Agente
+            333: "supervisor",   # Helpdesk Gestor
+            332: "supervisor",   # Helpdesk Admin
+        }
+        role = "creador"  # default fallback
+
+        def _gid(g):
+            """Extract integer group ID from [id, name] tuple or int."""
+            if isinstance(g, (list, tuple)) and len(g) >= 1:
+                try:
+                    return int(g[0])
+                except (TypeError, ValueError):
+                    return None
+            if isinstance(g, int):
+                return g
+            return None
+
+        # Priority: supervisor (admin/manager) > resueltor (agent) > creador (client)
         for g in groups:
-            if isinstance(g, list) and len(g) >= 2:
-                gname = str(g[1]).lower()
-                if "manager" in gname or "supervisor" in gname:
-                    role = "supervisor"
-                    break
-                if "agente" in gname or "resolutor" in gname or "agent" in gname:
-                    role = "resueltor"
+            gid = _gid(g)
+            if gid in (332, 333):
+                role = "supervisor"
+                break
+            if gid == 334:
+                role = "resueltor"
+            # gid == 335 stays "creador" (default)
 
         return {
             "uid": uid,
@@ -831,18 +856,21 @@ class OdooAdapter(ITicketPort):
         """
         Return users that belong to the helpdesk agent or manager group.
 
-        Filters by group technical name from ITS_Helpdesk_base security.
+        Filters by group XML ID (resistant to name changes across Odoo versions).
 
         Returns:
             list[dict]: Each item has ``id``, ``name``, ``login``.
         """
+        # Use group IDs directly since full_name varies by category/localization.
+        # group_helpdesk_agent  = id 334, group_helpdesk_manager = id 333
         return await self._call_kw(
             "res.users", "search_read",
             [[
                 ["share", "=", False],
+                ["active", "=", True],
                 "|",
-                ["groups_id.full_name", "ilike", "Helpdesk / Agente"],
-                ["groups_id.full_name", "ilike", "Helpdesk / Manager"],
+                ["groups_id", "in", [334]],   # Helpdesk Agente
+                ["groups_id", "in", [333]],   # Helpdesk Gestor
             ]],
             {"fields": ["id", "name", "login"]},
         )
