@@ -67,7 +67,9 @@ async def chat(request: ChatRequest) -> ChatResponse:
          thread_id=thread_id, session_id=session_id)
 
     try:
-        agent = get_or_create_agent(request.user_rol)
+        agent = get_or_create_agent(
+            request.user_rol, auto_confirm=request.auto_confirm or False,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     try:
@@ -77,6 +79,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
             thread_id=thread_id,
             user_id=request.user_id,
             user_role=request.user_rol,
+            auto_confirm=request.auto_confirm or False,
         )
     except Exception as exc:
         logger.exception("Agent error for thread=%s user=%s", thread_id, request.user_id)

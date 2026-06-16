@@ -316,6 +316,9 @@ from tools.rag_tools import set_rag_port, get_rag_tools
 from prompts.creator import get_creator_prompt
 from prompts.resolver import get_resolver_prompt
 from prompts.supervisor import get_supervisor_prompt
+from prompts.creator_executive import get_creator_executive_prompt
+from prompts.resolver_executive import get_resolver_executive_prompt
+from prompts.supervisor_executive import get_supervisor_executive_prompt
 
 
 # ── Prompt registry ───────────────────────────────────────────────────────────
@@ -324,6 +327,17 @@ _PROMPT_BUILDERS = {
     "creador":    get_creator_prompt,
     "resueltor":  get_resolver_prompt,
     "supervisor": get_supervisor_prompt,
+}
+
+# Executive prompt registry: used when auto_confirm=True. These prompts are
+# minimal versions that instruct the LLM to execute tools immediately without
+# asking for clarification or confirmation. Designed for E2E tests and
+# automation. The role-specific Q&A instructions are intentionally omitted
+# because they block tool calls in automated flows.
+_EXECUTIVE_PROMPT_BUILDERS = {
+    "creador":    get_creator_executive_prompt,
+    "resueltor":  get_resolver_executive_prompt,
+    "supervisor": get_supervisor_executive_prompt,
 }
 
 _DEFAULT_PROMPT = (
@@ -337,20 +351,33 @@ _DEFAULT_PROMPT = (
 _agent_cache: dict = {}
 
 
-def get_or_create_agent(role: str):
+def get_or_create_agent(role: str, auto_confirm: bool = False):
     """
     Returns a compiled LangGraph ReAct agent for the given role.
-    Agents are cached at module level — one per role, shared by all routes.
-    Both /agent/chat and /agent/stream use the same instance.
+
+    Two graph variants per role are cached:
+    - {role}: auto_confirm=True  → tools execute immediately, no interruption.
+      Used for E2E tests, automation, and programmatic flows.
+    - {role}:interactive: auto_confirm=False → interrupt_before=["tools"].
+      Used for the human chat UI: the graph pauses before tool execution and
+      the caller (chat route) returns pending actions for user confirmation.
+
+    Agents are cached at module level — one per (role, mode) pair, shared
+    by all routes. Both /agent/chat and /agent/stream use the same instance
+    for the same (role, auto_confirm) combination.
     """
-    if role not in _agent_cache:
+    cache_key = f"{role}:auto" if auto_confirm else f"{role}:interactive"
+    if cache_key not in _agent_cache:
         tools = get_tools_for_role(role)
         if not tools:
             raise ValueError(
                 f"Unknown role '{role}'. Valid: creador, resueltor, supervisor"
             )
-        _agent_cache[role] = create_agent(tools)
-    return _agent_cache[role]
+        # Interactive mode: pause before tool execution for human confirmation.
+        # Auto mode: no pause, tools execute as soon as the LLM emits them.
+        interrupt_before = None if auto_confirm else ["tools"]
+        _agent_cache[cache_key] = create_agent(tools, interrupt_before=interrupt_before)
+    return _agent_cache[cache_key]
 
 
 # ── Dependency injection ──────────────────────────────────────────────────────
@@ -398,10 +425,18 @@ def get_tools_for_role(role: str) -> list:
 
 # ── Agent creation ────────────────────────────────────────────────────────────
 
-def create_agent(tools: list):
+def create_agent(tools: list, interrupt_before: list = None):
     """
     Builds and compiles a LangGraph ReAct agent with the given tools.
     One agent per role is created and cached in _agent_cache.
+
+    Args:
+        tools: List of tools the agent can call.
+        interrupt_before: Optional list of node names to pause before executing.
+            Pass ["tools"] to implement human-in-the-loop confirmation: the graph
+            will emit the AIMessage with tool_calls and pause, allowing the
+            caller to confirm before the tools execute. Pass None (default)
+            for a fully automated flow.
 
     pre_model_hook (_trim_hook):
     - Mantiene solo el SystemMessage más reciente (evita acumulación entre turnos).
@@ -490,6 +525,7 @@ def create_agent(tools: list):
         tools=tool_node,
         checkpointer=checkpointer,
         pre_model_hook=_trim_hook,
+        interrupt_before=interrupt_before,
     )
 
 
@@ -501,6 +537,7 @@ async def _prepare_invocation(
     thread_id: str,
     user_id: int,
     user_role: str,
+    auto_confirm: bool = False,
 ) -> tuple[dict, dict]:
     """
     Builds input_data and config for an agent invocation.
@@ -508,15 +545,24 @@ async def _prepare_invocation(
     Extracted to avoid duplicating this logic between get_response() and
     stream_response(). Both endpoints share exactly the same pre-flight:
 
-    1. Build system prompt from role-specific builder.
+    1. Build system prompt from role-specific builder (or executive variant).
     2. For creador: inject pre-fetched ticket context (cached per thread_id).
     3. Detect corrupted thread (orphaned tool_calls from a crashed Odoo session)
        and reset to a fresh thread_id if needed.
 
+    Args:
+        auto_confirm: When True, use the minimal executive prompt that tells
+            the LLM to execute tools immediately without asking questions.
+            Combined with the graph-level interrupt_before=False (handled by
+            get_or_create_agent), this gives a fully automated E2E flow.
+
     Returns:
         (input_data, config) — ready to pass to ainvoke() or astream_events()
     """
-    prompt_fn = _PROMPT_BUILDERS.get(user_role)
+    # Select the prompt builder based on mode. Executive prompts skip the
+    # role-specific Q&A flow that would otherwise block tool calls.
+    builders = _EXECUTIVE_PROMPT_BUILDERS if auto_confirm else _PROMPT_BUILDERS
+    prompt_fn = builders.get(user_role)
     system_content = prompt_fn(user_id) if prompt_fn else _DEFAULT_PROMPT
 
     if user_role == "creador":
@@ -654,15 +700,20 @@ async def get_response(
     thread_id: str,
     user_id: int,
     user_role: str,
+    auto_confirm: bool = False,
 ) -> str:
     """
     Invokes the agent and returns the final text reply.
 
     Uses ainvoke() — compatible with AsyncSqliteSaver which is required
     for the streaming endpoint. The /agent/chat route must be async too.
+
+    Args:
+        auto_confirm: When True, the agent executes tools immediately without
+            asking for confirmation. See _prepare_invocation() for details.
     """
     input_data, config = await _prepare_invocation(
-        agent, user_message, thread_id, user_id, user_role
+        agent, user_message, thread_id, user_id, user_role, auto_confirm,
     )
 
     from core.context import current_user_id as _uid_var
@@ -802,6 +853,7 @@ async def stream_response(
     thread_id: str,
     user_id: int,
     user_role: str,
+    auto_confirm: bool = False,
 ):
     """
     Async generator that streams the agent reply token by token via SSE.
@@ -815,9 +867,13 @@ async def stream_response(
     Frontend consumes with fetch + ReadableStream or EventSource.
     The existing /agent/chat endpoint is unaffected — both routes share the
     same compiled agent instance via get_or_create_agent().
+
+    Args:
+        auto_confirm: When True, the agent executes tools immediately without
+            asking for confirmation.
     """
     input_data, config = await _prepare_invocation(
-        agent, user_message, thread_id, user_id, user_role
+        agent, user_message, thread_id, user_id, user_role, auto_confirm,
     )
 
     from core.context import current_user_id as _uid_var
