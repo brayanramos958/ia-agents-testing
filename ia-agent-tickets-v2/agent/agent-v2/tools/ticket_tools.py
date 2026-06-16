@@ -383,9 +383,6 @@ async def assign_ticket(
     """
     Assign a ticket to a resolver agent.
 
-    Always show the list of resolvers (``get_resolvers``) before calling this.
-    Confirm with the user before assigning.
-
     Args:
         ticket_id: Numeric ticket ID.
         assignee_id: ID of the resolver to assign (from ``get_resolvers``).
