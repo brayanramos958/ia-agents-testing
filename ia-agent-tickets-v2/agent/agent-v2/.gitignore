@@ -1,0 +1,62 @@
+# Environment
+.env
+env.docker
+env.local
+*.env.local
+
+# Credentials — NEVER commit passwords
+config/test_users.json
+config/*_credentials.json
+*.secret
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+.build-timestamp
+
+# Database files (legacy)
+*.db
+*.db-journal
+*.sqlite3
+
+# Certificates
+certs/
+*.pem
+*.key
+
+# Backups
+backups/
+*.backup
+*.bak
+
+# Scratch / test files (untracked)
+scratch/test_*.py
+!scratch/__init__.py
