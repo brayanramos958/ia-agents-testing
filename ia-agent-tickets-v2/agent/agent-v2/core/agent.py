@@ -694,6 +694,98 @@ def _fallback_was_used() -> bool:
 
 # ── Response extraction ───────────────────────────────────────────────────────
 
+
+def _describe_action(tool_name: str, args: dict) -> str:
+    """
+    Generate a brief human-readable description of a tool call for the UI.
+
+    Not every tool needs a custom description — unrecognised tools get a
+    generic label. This is presentation logic, not business logic; adding
+    a new tool description here does not affect the agent's behaviour.
+    """
+    ticket_id = args.get("ticket_id", "?")
+    if tool_name == "create_ticket":
+        return f"Crear ticket: {args.get('asunto', 'sin asunto')[:60]}"
+    if tool_name == "assign_ticket":
+        return f"Asignar ticket {ticket_id} al agente {args.get('assignee_id', '?')}"
+    if tool_name == "resolve_ticket":
+        return f"Resolver ticket {ticket_id}"
+    if tool_name == "approve_ticket":
+        return f"Aprobar ticket {ticket_id}"
+    if tool_name == "reject_ticket":
+        return f"Rechazar ticket {ticket_id}"
+    if tool_name == "reopen_ticket":
+        return f"Reabrir ticket {ticket_id}"
+    if tool_name == "update_ticket":
+        return f"Actualizar ticket {ticket_id}"
+    return f"Ejecutar {tool_name}"
+
+
+def _extract_pending_actions(result: dict) -> list[dict]:
+    """
+    Extract pending tool calls from the last AIMessage in the agent result.
+
+    When the graph is interrupted before the tools node, the last message
+    is an AIMessage with tool_calls but no corresponding ToolMessages.
+    This helper reads those tool_calls and builds the pending_actions list
+    expected by the API schema.
+
+    Returns an empty list if there are no pending tool calls.
+    """
+    for msg in reversed(result.get("messages", [])):
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+            actions = []
+            for tc in msg.tool_calls:
+                actions.append({
+                    "tool_call_id": tc["id"],
+                    "tool_name": tc["name"],
+                    "arguments": tc.get("args", {}),
+                    "description": _describe_action(tc["name"], tc.get("args", {})),
+                })
+            return actions
+    return []
+
+
+def _extract_pending_actions_from_state(state) -> list[dict]:
+    """
+    Extract pending tool calls from a LangGraph StateSnapshot.
+
+    Used in the streaming path where we don't have a result dict —
+    instead we query the checkpointer directly via agent.aget_state().
+    """
+    messages = state.values.get("messages", []) if state.values else []
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+            actions = []
+            for tc in msg.tool_calls:
+                actions.append({
+                    "tool_call_id": tc["id"],
+                    "tool_name": tc["name"],
+                    "arguments": tc.get("args", {}),
+                    "description": _describe_action(tc["name"], tc.get("args", {})),
+                })
+            return actions
+    return []
+
+
+def _pending_reply_text(result: dict, pending: list) -> str:
+    """
+    Return a human-readable reply when the graph is awaiting confirmation.
+
+    If the LLM provided text content in its tool-call message (e.g.
+    "Voy a crear un ticket de VPN, ¿confirmás?"), use that. Otherwise
+    generate a sensible default from the pending actions.
+    """
+    for msg in reversed(result.get("messages", [])):
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+            if msg.content:
+                return msg.content
+    # Fallback — LLM didn't provide text with its tool calls
+    if len(pending) == 1:
+        return f"Necesito tu confirmación para: {pending[0]['description']}"
+    return f"Necesito tu confirmación para {len(pending)} acciones."
+
+
 async def get_response(
     agent,
     user_message: str,
@@ -701,9 +793,19 @@ async def get_response(
     user_id: int,
     user_role: str,
     auto_confirm: bool = False,
-) -> str:
+) -> dict:
     """
-    Invokes the agent and returns the final text reply.
+    Invokes the agent and returns a structured reply.
+
+    Returns a dict with keys:
+        reply: str           — The text response for the user
+        status: str          — "ok" or "pending_actions"
+        pending_actions: list — Empty on "ok", populated when graph is interrupted
+
+    When auto_confirm=False and the graph is compiled with interrupt_before=["tools"],
+    the LLM may emit tool_calls that are paused before execution. This function
+    detects that state and returns status="pending_actions" so the caller can
+    display confirmation UI.
 
     Uses ainvoke() — compatible with AsyncSqliteSaver which is required
     for the streaming endpoint. The /agent/chat route must be async too.
@@ -726,10 +828,14 @@ async def get_response(
         _log.warning(
             "llm_semaphore_timeout",
             extra={"timeout": settings.llm_semaphore_timeout, "thread_id": thread_id})
-        return (
-            "El sistema está procesando muchas solicitudes en este momento. "
-            "Por favor intenta de nuevo en unos segundos."
-        )
+        return {
+            "reply": (
+                "El sistema está procesando muchas solicitudes en este momento. "
+                "Por favor intenta de nuevo en unos segundos."
+            ),
+            "status": "ok",
+            "pending_actions": [],
+        }
 
     # ── LLM usage tracking (Phase 3) ──────────────────────────────────────
     import time as _time
@@ -805,8 +911,32 @@ async def get_response(
         user_id, thread_id, tokens_in, tokens_out, cost, elapsed_ms,
     )
 
-    # Invalidate creator context cache when create_ticket succeeds so the next
-    # message reflects the newly created ticket in the user's history.
+    # ── Detect graph interruption (human-in-the-loop) ──────────────────────
+    # When interrupt_before=["tools"] is active, LangGraph pauses after the
+    # LLM emits tool_calls but before the tools node executes.
+    # state.next is non-empty when the graph is waiting for a human to resume it.
+    graph_interrupted = False
+    try:
+        state = await agent.aget_state(config)
+        if state.next:
+            graph_interrupted = True
+    except (psycopg.Error, ConnectionError, TimeoutError, RuntimeError) as _state_err:
+        # Best-effort: if the checkpointer is unreachable, fall through to
+        # the normal text-response path. The caller will see an empty reply
+        # instead of pending_actions, which is the safe degraded state.
+        _log.debug("Could not check graph state for interruption: %s", _state_err)
+
+    if graph_interrupted:
+        pending = _extract_pending_actions(result)
+        reply = _pending_reply_text(result, pending)
+        _log.info(
+            "Graph interrupted user=%s thread=%s pending=%d",
+            user_id, thread_id, len(pending),
+        )
+        return {"reply": reply, "status": "pending_actions", "pending_actions": pending}
+
+    # ── Invalidate creator context cache when create_ticket succeeds ──────
+    # So the next message reflects the newly created ticket in the user's history.
     if user_role == "creador":
         from langchain_core.messages import ToolMessage as _TMsg
         import json as _json
@@ -822,7 +952,7 @@ async def get_response(
                     pass
                 break
 
-    # Find the last AIMessage that has text content (not just tool calls)
+    # ── Normal path: find the last AIMessage with text content ────────────
     for msg in reversed(result.get("messages", [])):
         if (
             isinstance(msg, AIMessage)
@@ -837,12 +967,174 @@ async def get_response(
                     "pii_redacted user=%s thread=%s count=%d",
                     user_id, thread_id, redaction_count,
                 )
-            return redacted
+            return {"reply": redacted, "status": "ok", "pending_actions": []}
 
-    return (
-        "No pude procesar tu solicitud en este momento. "
-        "Por favor intenta de nuevo."
+    return {
+        "reply": (
+            "No pude procesar tu solicitud en este momento. "
+            "Por favor intenta de nuevo."
+        ),
+        "status": "ok",
+        "pending_actions": [],
+    }
+
+
+# ── Graph resume (human-in-the-loop confirmation) ────────────────────────────
+
+
+async def resume_agent(agent, thread_id: str, user_id: int) -> dict:
+    """
+    Resume a graph that was interrupted at the tools node.
+
+    When the agent is compiled with ``interrupt_before=["tools"]`` and the
+    LLM emits tool_calls, the graph pauses. The user confirms the actions
+    and this function re-enters the graph so the tools execute and the LLM
+    generates the final response.
+
+    After resume, the graph may complete (status="ok") or interrupt AGAIN
+    (status="pending_actions") if the LLM emits more tool_calls that also
+    need confirmation.
+
+    Returns the same dict shape as :func:`get_response`::
+        {"reply": str, "status": str, "pending_actions": list}
+
+    Raises:
+        RuntimeError: If the graph is not in an interrupted state.
+
+    Args:
+        agent: The compiled LangGraph agent.
+        thread_id: The conversation thread to resume (must match the
+            thread that was interrupted).
+        user_id: The authenticated user (required for context injection
+            inside tools like create_ticket).
+    """
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 30}
+
+    # ── Verify the graph is actually interrupted ───────────────────────────
+    try:
+        state = await agent.aget_state(config)
+    except (psycopg.Error, ConnectionError, TimeoutError) as _state_err:
+        raise RuntimeError(
+            f"No se pudo verificar el estado del thread {thread_id}: {_state_err}"
+        ) from _state_err
+
+    if not state.next:
+        raise RuntimeError(
+            f"Thread {thread_id} no está esperando confirmación — "
+            "nada que confirmar."
+        )
+
+    # ── Inject user_id into context for tool authorisation ─────────────────
+    from core.context import current_user_id as _uid_var
+    _uid_var.set(user_id)
+
+    # ── Semaphore (same rate-limiting as get_response) ─────────────────────
+    sem = _get_llm_semaphore()
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout=settings.llm_semaphore_timeout)
+    except asyncio.TimeoutError:
+        return {
+            "reply": "El sistema está muy ocupado. Intenta confirmar en unos segundos.",
+            "status": "ok",
+            "pending_actions": [],
+        }
+
+    # ── LLM usage tracking ────────────────────────────────────────────────
+    import time as _time
+    from feedback.collector import FeedbackCollector
+    _llm_started = _time.perf_counter()
+    _llm_collector = FeedbackCollector()
+    provider = settings.llm_provider
+    model = (
+        settings.ai_gateway_model
+        if provider == "vercel"
+        else settings.llm_model
     )
+    result = None
+
+    try:
+        _log.info("Graph resume started user=%s thread=%s", user_id, thread_id)
+        # Passing None as input tells LangGraph to continue from the
+        # checkpoint — it picks up the interrupted state and executes
+        # the tools node, then runs the LLM again for a final response.
+        result = await agent.ainvoke(None, config=config)
+        from core.circuit_breaker import get_provider_status
+        provider_status = get_provider_status(model)
+        provider_status.record_success()
+    except (TimeoutError, ConnectionError, RuntimeError, ValueError) as e:
+        _llm_error = repr(e)
+        _log.error("Graph resume failed user=%s thread=%s error=%s", user_id, thread_id, e, exc_info=True)
+        from core.circuit_breaker import get_provider_status
+        provider_status = get_provider_status(model)
+        provider_status.record_failure()
+        _llm_collector.record_llm_usage(
+            thread_id=thread_id,
+            user_id=user_id,
+            user_role="",
+            provider_used=provider,
+            model_used=model,
+            tokens_input=0,
+            tokens_output=0,
+            latency_ms=(_time.perf_counter() - _llm_started) * 1000,
+            fallback_triggered=False,
+            cost_usd=0.0,
+            error=_llm_error,
+        )
+        raise
+    finally:
+        sem.release()
+
+    # ── Record success metrics ────────────────────────────────────────────
+    elapsed_ms = (_time.perf_counter() - _llm_started) * 1000
+    tokens_in, tokens_out = _extract_usage(result)
+    cost = _calc_cost(model, tokens_in, tokens_out)
+    _llm_collector.record_llm_usage(
+        thread_id=thread_id,
+        user_id=user_id,
+        user_role="",
+        provider_used=provider,
+        model_used=model,
+        tokens_input=tokens_in,
+        tokens_output=tokens_out,
+        latency_ms=elapsed_ms,
+        fallback_triggered=_fallback_was_used(),
+        cost_usd=cost,
+        error="",
+    )
+    _log.info(
+        "Graph resume complete user=%s thread=%s tokens_in=%d tokens_out=%d latency=%.0fms",
+        user_id, thread_id, tokens_in, tokens_out, elapsed_ms,
+    )
+
+    # ── After resume: check if graph is interrupted AGAIN ─────────────────
+    # The LLM may have emitted more tool_calls that also need confirmation.
+    # This is the recursive case: confirm → tools execute → LLM emits more
+    # tool_calls → graph interrupts again.
+    try:
+        state = await agent.aget_state(config)
+        if state.next:
+            pending = _extract_pending_actions(result)
+            reply = _pending_reply_text(result, pending)
+            _log.info(
+                "Graph interrupted again user=%s thread=%s pending=%d",
+                user_id, thread_id, len(pending),
+            )
+            return {"reply": reply, "status": "pending_actions", "pending_actions": pending}
+    except Exception:
+        pass  # Best-effort; fall through to final text
+
+    # ── Final text response ───────────────────────────────────────────────
+    for msg in reversed(result.get("messages", [])):
+        if (
+            isinstance(msg, AIMessage)
+            and msg.content
+            and not getattr(msg, "tool_calls", None)
+        ):
+            from core.pii_redaction import redact_pii
+            redacted, _ = redact_pii(msg.content)
+            return {"reply": redacted, "status": "ok", "pending_actions": []}
+
+    return {"reply": "Acción completada.", "status": "ok", "pending_actions": []}
 
 
 # ── Streaming response ────────────────────────────────────────────────────────
@@ -948,6 +1240,24 @@ async def stream_response(
                 output = event.get("data", {}).get("output")
                 if output is not None:
                     _stream_last_ai_msg = output
+
+        # ── After stream: detect graph interruption ────────────────────────
+        # When interrupt_before=["tools"] pauses the graph, astream_events
+        # yields the LLM's text/tool_call_chunks but never reaches
+        # on_tool_start. We detect the paused state and emit pending_actions
+        # so the client can render a confirmation UI.
+        try:
+            state = await agent.aget_state(config)
+            if state.next:
+                pending = _extract_pending_actions_from_state(state)
+                if pending:
+                    _log.info(
+                        "Stream interrupted user=%s thread=%s pending=%d",
+                        user_id, thread_id, len(pending),
+                    )
+                    yield f"data: {json.dumps({'t': 'pending_actions', 'v': pending})}\n\n"
+        except (psycopg.Error, ConnectionError, TimeoutError, RuntimeError) as _state_err:
+            _log.debug("Could not check stream interruption: %s", _state_err)
 
         yield f"data: {json.dumps({'t': 'done'})}\n\n"
 
