@@ -1,6 +1,7 @@
 """
-POST /agent/chat  — conversational endpoint for human users.
+POST /agent/chat    — conversational endpoint for human users.
 POST /agent/confirm — resume an interrupted graph after human confirmation.
+POST /agent/reject  — cancel all pending tool calls in an interrupted graph.
 
 One compiled LangGraph agent per role is cached in _agents dict.
 All users with the same role share one agent; thread_id differentiates them.
@@ -10,10 +11,10 @@ Agents are lazy-initialized on first request for that role.
 import logging
 from datetime import date
 from fastapi import APIRouter, HTTPException
-from api.schemas.chat import ChatRequest, ChatResponse, ConfirmRequest
+from api.schemas.chat import ChatRequest, ChatResponse, ConfirmRequest, RejectRequest
 from api.middleware.rate_limit import check_rate_limit
 from api.middleware.injection_detector import scan_message  # Security Capa 2
-from core.agent import get_or_create_agent, get_response, resume_agent
+from core.agent import get_or_create_agent, get_response, resume_agent, reject_agent
 from core.context import current_thread_id, current_user_id, current_user_role
 from core.events import emit
 
@@ -23,7 +24,7 @@ router = APIRouter()
 # ── user_id validation ─────────────────────────────────────────────────────
 
 
-def _validate_body_match(request: ChatRequest | ConfirmRequest) -> None:
+def _validate_body_match(request: ChatRequest | ConfirmRequest | RejectRequest) -> None:
     """Verify body user_id/role match the JWT claims (Security: user_id validation)."""
     token_uid = current_user_id.get(0)
     token_role = current_user_role.get("")
@@ -39,6 +40,21 @@ def _validate_body_match(request: ChatRequest | ConfirmRequest) -> None:
             detail=(f"role mismatch: token={token_role} body={request.user_rol}. "
                     "El rol del body debe coincidir con el del token."),
         )
+
+
+def _normalize_thread_id(raw: str, user_id: int) -> str:
+    """
+    Normalise a thread_id to the format ``{user_id}:{id}`` used by the checkpointer.
+
+    Accepts both the raw id (e.g. "test-001") and the already-prefixed form
+    (e.g. "2796:test-001") returned by ChatResponse.thread_id.
+    """
+    if not raw.startswith(f"{user_id}:"):
+        raw = raw.removeprefix(str(user_id)).lstrip(":")
+        raw = raw or str(date.today())
+    else:
+        raw = raw[len(str(user_id)) + 1:]
+    return f"{user_id}:{raw}"
 
 
 # ── Routes ──────────────────────────────────────────────────────────────────
@@ -110,16 +126,7 @@ async def confirm(request: ConfirmRequest) -> ChatResponse:
     _validate_body_match(request)
     check_rate_limit(request.user_id)
 
-    # Build the full thread_id the same way /agent/chat does.
-    # The frontend may send the raw id from ChatResponse (already prefixed)
-    # or the short id — we normalise to {user_id}:{id} for the checkpointer.
-    raw_thread = request.thread_id
-    if not raw_thread.startswith(f"{request.user_id}:"):
-        raw_thread = raw_thread.removeprefix(str(request.user_id)).lstrip(":")
-        raw_thread = raw_thread or str(date.today())
-    else:
-        raw_thread = raw_thread[len(str(request.user_id)) + 1:]
-    thread_id = f"{request.user_id}:{raw_thread}"
+    thread_id = _normalize_thread_id(request.thread_id, request.user_id)
     current_thread_id.set(thread_id)
 
     # Confirmation always uses the interactive agent (auto_confirm=False).
@@ -134,6 +141,7 @@ async def confirm(request: ConfirmRequest) -> ChatResponse:
             agent=agent,
             thread_id=thread_id,
             user_id=request.user_id,
+            confirm_action_ids=request.confirm_action_ids,
         )
     except RuntimeError as exc:
         # 409 Conflict: the graph is not in a state that can be resumed
@@ -141,6 +149,53 @@ async def confirm(request: ConfirmRequest) -> ChatResponse:
     except Exception as exc:
         logger.exception(
             "Confirm error for thread=%s user=%s", thread_id, request.user_id,
+        )
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return ChatResponse(
+        reply=agent_reply["reply"],
+        thread_id=thread_id,
+        status=agent_reply.get("status", "ok"),
+        pending_actions=agent_reply.get("pending_actions", []),
+    )
+
+
+@router.post("/agent/reject", response_model=ChatResponse)
+async def reject(request: RejectRequest) -> ChatResponse:
+    """
+    Reject all pending tool calls in an interrupted graph.
+
+    When /agent/chat returns status="pending_actions", the frontend renders
+    a confirmation UI with a "Cancelar" button. When the user rejects,
+    this endpoint sends rejection ToolMessages to the graph so the LLM
+    can acknowledge the cancellation and the thread is freed for further
+    conversation.
+    """
+    _validate_body_match(request)
+    check_rate_limit(request.user_id)
+
+    thread_id = _normalize_thread_id(request.thread_id, request.user_id)
+    current_thread_id.set(thread_id)
+
+    # Rejection always uses the interactive agent.
+    try:
+        agent = get_or_create_agent(request.user_rol, auto_confirm=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    try:
+        agent_reply = await reject_agent(
+            agent=agent,
+            thread_id=thread_id,
+            user_id=request.user_id,
+            reason=request.reason or "",
+        )
+    except RuntimeError as exc:
+        # 409 Conflict: the graph is not in a state that can be rejected
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:
+        logger.exception(
+            "Reject error for thread=%s user=%s", thread_id, request.user_id,
         )
         raise HTTPException(status_code=500, detail=str(exc))
 

@@ -310,9 +310,18 @@ from core.graph import build_llm, build_checkpointer
 from tools.ticket_tools import (
     set_ticket_port, set_rag_port_for_tickets,
     get_creator_tools, get_resolver_tools, get_supervisor_tools,
+    create_ticket, get_my_created_tickets, get_my_assigned_tickets,
+    get_ticket_detail, resolve_ticket, update_ticket,
+    get_all_tickets, assign_ticket, reopen_ticket,
+    approve_ticket, reject_ticket,
 )
-from tools.user_tools import set_user_port, get_catalog_tools
-from tools.rag_tools import set_rag_port, get_rag_tools
+from tools.user_tools import (
+    set_user_port, get_catalog_tools,
+    get_ticket_types, get_categories, get_urgency_levels,
+    get_impact_levels, get_priority_levels,
+    get_resolvers, get_agent_groups, get_stages,
+)
+from tools.rag_tools import set_rag_port, get_rag_tools, suggest_solution
 from prompts.creator import get_creator_prompt
 from prompts.resolver import get_resolver_prompt
 from prompts.supervisor import get_supervisor_prompt
@@ -402,11 +411,6 @@ def get_tools_for_role(role: str) -> list:
     that are not in its list regardless of what the prompt says.
     """
     rag = get_rag_tools()
-    from tools.user_tools import (
-        get_ticket_types, get_categories, get_urgency_levels,
-        get_impact_levels, get_priority_levels,
-        get_resolvers, get_agent_groups, get_stages,
-    )
 
     if role == "creador":
         creator_catalog = [get_ticket_types, get_categories, get_urgency_levels,
@@ -699,25 +703,59 @@ def _describe_action(tool_name: str, args: dict) -> str:
     """
     Generate a brief human-readable description of a tool call for the UI.
 
-    Not every tool needs a custom description — unrecognised tools get a
-    generic label. This is presentation logic, not business logic; adding
-    a new tool description here does not affect the agent's behaviour.
+    The description is shown in the confirmation prompt so the user
+    understands what the agent wants to do before confirming or rejecting.
     """
     ticket_id = args.get("ticket_id", "?")
+    asunto = str(args.get("asunto", ""))[:50]
+    category = str(args.get("category_id", "?"))
+
     if tool_name == "create_ticket":
-        return f"Crear ticket: {args.get('asunto', 'sin asunto')[:60]}"
+        label = f"Crear ticket: {asunto}" if asunto else f"Crear ticket #{ticket_id}"
+        if category != "?":
+            label += f" (categoría: {category})"
+        return label
     if tool_name == "assign_ticket":
-        return f"Asignar ticket {ticket_id} al agente {args.get('assignee_id', '?')}"
+        return f"Asignar ticket #{ticket_id} al agente #{args.get('assignee_id', '?')}"
     if tool_name == "resolve_ticket":
-        return f"Resolver ticket {ticket_id}"
+        return f"Resolver ticket #{ticket_id}"
     if tool_name == "approve_ticket":
-        return f"Aprobar ticket {ticket_id}"
+        return f"Aprobar ticket #{ticket_id}"
     if tool_name == "reject_ticket":
-        return f"Rechazar ticket {ticket_id}"
+        return f"Rechazar ticket #{ticket_id}"
     if tool_name == "reopen_ticket":
-        return f"Reabrir ticket {ticket_id}"
+        return f"Reabrir ticket #{ticket_id}"
     if tool_name == "update_ticket":
-        return f"Actualizar ticket {ticket_id}"
+        fields = ", ".join(list(args.get("fields", {}).keys())[:3])
+        desc = f"Actualizar ticket #{ticket_id}"
+        return f"{desc} ({fields})" if fields else desc
+    if tool_name == "suggest_solution":
+        desc_text = str(args.get("description", ""))[:60]
+        return f"Buscar soluciones para: {desc_text}" if desc_text else "Buscar soluciones en la base de conocimiento"
+    if tool_name == "get_ticket_detail":
+        return f"Ver detalle del ticket #{ticket_id}"
+    if tool_name == "get_ticket_types":
+        return "Consultar tipos de tickets disponibles"
+    if tool_name == "get_categories":
+        return "Consultar categorías disponibles"
+    if tool_name == "get_urgency_levels":
+        return "Consultar niveles de urgencia"
+    if tool_name == "get_impact_levels":
+        return "Consultar niveles de impacto"
+    if tool_name == "get_priority_levels":
+        return "Consultar niveles de prioridad"
+    if tool_name == "get_resolvers":
+        return "Consultar agentes disponibles"
+    if tool_name == "get_agent_groups":
+        return "Consultar grupos de agentes"
+    if tool_name == "get_stages":
+        return "Consultar etapas de tickets"
+    if tool_name == "get_my_created_tickets":
+        return "Consultar mis tickets creados"
+    if tool_name == "get_my_assigned_tickets":
+        return "Consultar tickets asignados a mí"
+    if tool_name == "get_all_tickets":
+        return "Consultar todos los tickets del sistema"
     return f"Ejecutar {tool_name}"
 
 
@@ -982,7 +1020,74 @@ async def get_response(
 # ── Graph resume (human-in-the-loop confirmation) ────────────────────────────
 
 
-async def resume_agent(agent, thread_id: str, user_id: int) -> dict:
+def _build_tool_registry() -> dict:
+    """
+    Lazy-built mapping of tool_name → async callable.
+
+    Used by ``_execute_tool_by_name()`` for granular confirmation where
+    we need to manually execute individual tools instead of letting the
+    graph's ToolNode run them all.
+
+    Built lazily (not at import time) to avoid circular dependency issues
+    with tools/* modules that import from core/*.
+    """
+    registry = {
+        # Creator tools (ticket_tools)
+        "create_ticket":          create_ticket,
+        "get_my_created_tickets": get_my_created_tickets,
+        # Resolver tools (ticket_tools)
+        "get_my_assigned_tickets": get_my_assigned_tickets,
+        "resolve_ticket":         resolve_ticket,
+        # Shared ticket tools
+        "get_ticket_detail":      get_ticket_detail,
+        "update_ticket":          update_ticket,
+        # Supervisor tools (ticket_tools)
+        "get_all_tickets":        get_all_tickets,
+        "assign_ticket":          assign_ticket,
+        "reopen_ticket":          reopen_ticket,
+        "approve_ticket":         approve_ticket,
+        "reject_ticket":          reject_ticket,
+        # Catalog tools (user_tools)
+        "get_ticket_types":       get_ticket_types,
+        "get_categories":         get_categories,
+        "get_urgency_levels":     get_urgency_levels,
+        "get_impact_levels":      get_impact_levels,
+        "get_priority_levels":    get_priority_levels,
+        "get_resolvers":          get_resolvers,
+        "get_agent_groups":       get_agent_groups,
+        "get_stages":             get_stages,
+        # RAG tools
+        "suggest_solution":       suggest_solution,
+    }
+    return registry
+
+
+async def _execute_tool_by_name(tool_name: str, args: dict) -> dict:
+    """
+    Execute a single tool by name and return its result.
+
+    Used by ``resume_agent()`` for granular confirmation: when only a
+    subset of tool calls are confirmed, we execute those manually and
+    send their results as ToolMessages to the graph.
+
+    Returns:
+        dict: The tool's return value (usually {"success": bool, ...}).
+
+    Raises:
+        ValueError: If the tool name is unknown.
+    """
+    registry = _build_tool_registry()
+    tool_fn = registry.get(tool_name)
+    if tool_fn is None:
+        raise ValueError(
+            f"Unknown tool '{tool_name}' — cannot execute for granular "
+            f"confirmation. Known tools: {list(registry.keys())}"
+        )
+    # All tool functions are async; call them directly in the event loop.
+    return await tool_fn(**args)
+
+
+async def resume_agent(agent, thread_id: str, user_id: int, confirm_action_ids: list = None) -> dict:
     """
     Resume a graph that was interrupted at the tools node.
 
@@ -1054,10 +1159,69 @@ async def resume_agent(agent, thread_id: str, user_id: int) -> dict:
 
     try:
         _log.info("Graph resume started user=%s thread=%s", user_id, thread_id)
-        # Passing None as input tells LangGraph to continue from the
-        # checkpoint — it picks up the interrupted state and executes
-        # the tools node, then runs the LLM again for a final response.
-        result = await agent.ainvoke(None, config=config)
+
+        if confirm_action_ids is not None and len(confirm_action_ids) > 0:
+            # ── Granular confirmation ────────────────────────────────────
+            # User confirmed only a subset of pending tool calls.
+            # Execute confirmed tools manually and send results + rejections
+            # as ToolMessages so LangGraph doesn't run the ToolNode.
+            from langchain_core.messages import ToolMessage as _TMsg
+
+            all_pending = _extract_pending_actions_from_state(state)
+            confirm_set = set(confirm_action_ids)
+
+            tool_messages = []
+            for action in all_pending:
+                if action["tool_call_id"] in confirm_set:
+                    # Execute the tool manually and wrap result
+                    try:
+                        tool_result = await _execute_tool_by_name(
+                            action["tool_name"], action["arguments"],
+                        )
+                    except Exception as _exec_err:
+                        tool_result = {
+                            "success": False,
+                            "error": f"Error ejecutando tool: {_exec_err}",
+                        }
+                    tool_messages.append(_TMsg(
+                        content=json.dumps(tool_result),
+                        tool_call_id=action["tool_call_id"],
+                        name=action["tool_name"],
+                    ))
+                    _log.debug(
+                        "Granular confirm: executed %s for thread=%s",
+                        action["tool_name"], thread_id,
+                    )
+                else:
+                    # Reject non-confirmed tool calls
+                    tool_messages.append(_TMsg(
+                        content=json.dumps({
+                            "rejected": True,
+                            "reason": "El usuario no confirmó esta acción",
+                        }),
+                        tool_call_id=action["tool_call_id"],
+                        name=action["tool_name"],
+                    ))
+                    _log.debug(
+                        "Granular confirm: rejected %s for thread=%s",
+                        action["tool_name"], thread_id,
+                    )
+
+            _log.info(
+                "Granular confirm user=%s thread=%s confirmed=%d/%d",
+                user_id, thread_id,
+                len(confirm_set), len(all_pending),
+            )
+
+            # Send ToolMessages as input — LangGraph uses them as
+            # pre-computed tool results instead of executing the ToolNode.
+            result = await agent.ainvoke({"messages": tool_messages}, config=config)
+        else:
+            # ── Full confirmation (current behaviour) ───────────────────
+            # Passing None tells LangGraph to continue from the checkpoint
+            # and execute all pending tools via the ToolNode.
+            result = await agent.ainvoke(None, config=config)
+
         from core.circuit_breaker import get_provider_status
         provider_status = get_provider_status(model)
         provider_status.record_success()
@@ -1135,6 +1299,172 @@ async def resume_agent(agent, thread_id: str, user_id: int) -> dict:
             return {"reply": redacted, "status": "ok", "pending_actions": []}
 
     return {"reply": "Acción completada.", "status": "ok", "pending_actions": []}
+
+
+# ── Graph reject (human-in-the-loop cancellation) ─────────────────────────────
+
+
+async def reject_agent(agent, thread_id: str, user_id: int, reason: str = "") -> dict:
+    """
+    Reject all pending tool calls for an interrupted graph.
+
+    Instead of executing the tools, this sends ToolMessages with rejection
+    content. LangGraph treats these as pre-computed tool results and feeds
+    them to the LLM, which can then respond to the user appropriately
+    (e.g. *"Entendido, cancelé la operación. ¿En qué más puedo ayudarte?"*).
+
+    Returns the same dict shape as :func:`get_response`::
+        {"reply": str, "status": str, "pending_actions": list}
+
+    Raises:
+        RuntimeError: If the graph is not in an interrupted state or has
+            no pending tool calls.
+
+    Args:
+        agent: The compiled LangGraph agent.
+        thread_id: The conversation thread to reject.
+        user_id: The authenticated user.
+        reason: Optional human-readable rejection reason (for logging).
+    """
+    from langchain_core.messages import ToolMessage
+
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 30}
+
+    # ── Verify the graph is actually interrupted ───────────────────────────
+    try:
+        state = await agent.aget_state(config)
+    except (psycopg.Error, ConnectionError, TimeoutError) as _state_err:
+        raise RuntimeError(
+            f"No se pudo verificar el estado del thread {thread_id}: {_state_err}"
+        ) from _state_err
+
+    if not state.next:
+        raise RuntimeError(
+            f"Thread {thread_id} no está esperando confirmación — "
+            "nada que rechazar."
+        )
+
+    # ── Extract pending tool calls ─────────────────────────────────────────
+    pending = _extract_pending_actions_from_state(state)
+    if not pending:
+        raise RuntimeError(
+            f"Thread {thread_id} está interrumpido pero no tiene "
+            "acciones pendientes para rechazar."
+        )
+
+    _log.info(
+        "Graph reject started user=%s thread=%s pending=%d reason=%s",
+        user_id, thread_id, len(pending), reason or "(none)",
+    )
+
+    # ── Inject user_id into context ────────────────────────────────────────
+    from core.context import current_user_id as _uid_var
+    _uid_var.set(user_id)
+
+    # ── Build rejection ToolMessages ───────────────────────────────────────
+    # Each ToolMessage matches a pending tool_call_id, so LangGraph
+    # routes it as a pre-computed result instead of executing the tool.
+    rejection_content = {"rejected": True}
+    if reason:
+        rejection_content["reason"] = reason
+    rejection_messages = [
+        ToolMessage(
+            content=json.dumps(rejection_content),
+            tool_call_id=action["tool_call_id"],
+            name=action["tool_name"],
+        )
+        for action in pending
+    ]
+
+    # ── Semaphore ──────────────────────────────────────────────────────────
+    sem = _get_llm_semaphore()
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout=settings.llm_semaphore_timeout)
+    except asyncio.TimeoutError:
+        return {
+            "reply": "El sistema está muy ocupado. Intenta rechazar en unos segundos.",
+            "status": "ok",
+            "pending_actions": [],
+        }
+
+    # ── LLM usage tracking ────────────────────────────────────────────────
+    import time as _time
+    from feedback.collector import FeedbackCollector
+    _llm_started = _time.perf_counter()
+    _llm_collector = FeedbackCollector()
+    provider = settings.llm_provider
+    model = (
+        settings.ai_gateway_model
+        if provider == "vercel"
+        else settings.llm_model
+    )
+    result = None
+
+    try:
+        _log.info("LLM reject call started user=%s thread=%s", user_id, thread_id)
+        # Send rejection ToolMessages as input — LangGraph won't execute
+        # the tools, it will feed these results to the LLM directly.
+        result = await agent.ainvoke({"messages": rejection_messages}, config=config)
+        from core.circuit_breaker import get_provider_status
+        provider_status = get_provider_status(model)
+        provider_status.record_success()
+    except (TimeoutError, ConnectionError, RuntimeError, ValueError) as e:
+        _llm_error = repr(e)
+        _log.error("LLM reject failed user=%s thread=%s error=%s", user_id, thread_id, e, exc_info=True)
+        from core.circuit_breaker import get_provider_status
+        provider_status = get_provider_status(model)
+        provider_status.record_failure()
+        _llm_collector.record_llm_usage(
+            thread_id=thread_id,
+            user_id=user_id,
+            user_role="",
+            provider_used=provider,
+            model_used=model,
+            tokens_input=0,
+            tokens_output=0,
+            latency_ms=(_time.perf_counter() - _llm_started) * 1000,
+            fallback_triggered=False,
+            cost_usd=0.0,
+            error=_llm_error,
+        )
+        raise
+    finally:
+        sem.release()
+
+    # ── Record success metrics ────────────────────────────────────────────
+    elapsed_ms = (_time.perf_counter() - _llm_started) * 1000
+    tokens_in, tokens_out = _extract_usage(result)
+    cost = _calc_cost(model, tokens_in, tokens_out)
+    _llm_collector.record_llm_usage(
+        thread_id=thread_id,
+        user_id=user_id,
+        user_role="",
+        provider_used=provider,
+        model_used=model,
+        tokens_input=tokens_in,
+        tokens_output=tokens_out,
+        latency_ms=elapsed_ms,
+        fallback_triggered=_fallback_was_used(),
+        cost_usd=cost,
+        error="",
+    )
+    _log.info(
+        "Graph reject complete user=%s thread=%s tokens_in=%d tokens_out=%d latency=%.0fms",
+        user_id, thread_id, tokens_in, tokens_out, elapsed_ms,
+    )
+
+    # ── Final text response (rejection → LLM should respond, not tool call) ──
+    for msg in reversed(result.get("messages", [])):
+        if (
+            isinstance(msg, AIMessage)
+            and msg.content
+            and not getattr(msg, "tool_calls", None)
+        ):
+            from core.pii_redaction import redact_pii
+            redacted, _ = redact_pii(msg.content)
+            return {"reply": redacted, "status": "ok", "pending_actions": []}
+
+    return {"reply": "Acciones rechazadas. ¿En qué más puedo ayudarte?", "status": "ok", "pending_actions": []}
 
 
 # ── Streaming response ────────────────────────────────────────────────────────

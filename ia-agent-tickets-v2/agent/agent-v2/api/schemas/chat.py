@@ -52,3 +52,20 @@ class ConfirmRequest(BaseModel):
     user_id: int
     user_rol: str  # "creador" | "resueltor" | "supervisor" — must match JWT
     confirm_action_ids: Optional[list[str]] = None  # None = confirm all
+
+
+class RejectRequest(BaseModel):
+    """
+    Request to reject all pending tool calls for an interrupted thread.
+
+    The graph will NOT execute any pending tools. Instead it sends
+    rejection ToolMessages to the LLM, which can then respond to the
+    user (e.g. "Entendido, cancelé la operación").
+
+    The thread_id format is ``{user_id}:{date_or_id}`` as built by
+    ``/agent/chat``.
+    """
+    thread_id: str
+    user_id: int
+    user_rol: str  # "creador" | "resueltor" | "supervisor" — must match JWT
+    reason: Optional[str] = None  # Optional rejection reason for logging
