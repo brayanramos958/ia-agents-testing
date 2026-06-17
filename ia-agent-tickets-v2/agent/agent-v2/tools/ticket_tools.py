@@ -27,6 +27,17 @@ from core.events import emit
 from core.security import frame_external_data
 from ports.rag_port import IRAGPort
 from ports.ticket_port import ITicketPort
+from core.validation import (
+    validate_tool,
+    CreateTicketSchema,
+    UpdateTicketSchema,
+    GetTicketDetailSchema,
+    AssignTicketSchema,
+    ApproveTicketSchema,
+    RejectTicketSchema,
+    ReopenTicketSchema,
+    ResolveTicketSchema,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +139,7 @@ def set_rag_port_for_tickets(rag_port: IRAGPort) -> None:
 
 @tool
 @backend_retry
+@validate_tool(CreateTicketSchema)
 async def create_ticket(
     asunto: str,
     ticket_type_id: Union[int, str],
@@ -253,6 +265,7 @@ async def get_my_assigned_tickets(user_id: Union[int, str]) -> list:
 
 @tool
 @backend_retry
+@validate_tool(ResolveTicketSchema)
 async def resolve_ticket(
     ticket_id: Union[int, str],
     motivo_resolucion: str,
@@ -305,6 +318,7 @@ async def resolve_ticket(
 
 @tool
 @backend_retry
+@validate_tool(GetTicketDetailSchema)
 async def get_ticket_detail(
     ticket_id: Union[int, str],
     user_id: Union[int, str],
@@ -325,6 +339,7 @@ async def get_ticket_detail(
 
 @tool
 @backend_retry
+@validate_tool(UpdateTicketSchema)
 async def update_ticket(
     ticket_id: Union[int, str],
     fields: dict,
@@ -386,6 +401,7 @@ async def get_all_tickets(filters: Optional[dict] = None) -> list:
 
 @tool
 @backend_retry
+@validate_tool(AssignTicketSchema)
 async def assign_ticket(
     ticket_id: Union[int, str],
     assignee_id: Union[int, str],
@@ -408,6 +424,7 @@ async def assign_ticket(
 
 @tool
 @backend_retry
+@validate_tool(ReopenTicketSchema)
 async def reopen_ticket(
     ticket_id: Union[int, str],
     reason: str,
@@ -428,6 +445,7 @@ async def reopen_ticket(
 
 @tool
 @backend_retry
+@validate_tool(ApproveTicketSchema)
 async def approve_ticket(
     ticket_id: Union[int, str],
     user_id: Union[int, str],
@@ -447,6 +465,7 @@ async def approve_ticket(
 
 @tool
 @backend_retry
+@validate_tool(RejectTicketSchema)
 async def reject_ticket(
     ticket_id: Union[int, str],
     reason: str,
