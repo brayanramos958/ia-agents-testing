@@ -149,8 +149,15 @@ class Settings(BaseSettings):
 
     # Number of non-system messages to keep in the LLM context window.
     # Older messages are trimmed by the pre_model_hook to prevent unbounded growth.
-    # See core/agent.py::_trim_hook for the trimming logic.
+    # The trim_hook additionally PROTECTS any AIMessage with tool_calls
+    # pending confirmation, so it never gets cut regardless of this limit.
+    # See core/agent.py::trim_hook for the trimming logic.
     chat_history_trim_limit: int = 8
+
+    # Maximum characters per ToolMessage content before truncation.
+    # Tool results (e.g. suggest_solution, catalog queries) can be very large.
+    # Truncating them keeps context within bounds without losing the signal.
+    tool_message_max_chars: int = 2000
 
     # ── Escalation thresholds (background scheduler) ────────────────────────
     # Hours of inactivity before a reminder is sent to the assigned agent.

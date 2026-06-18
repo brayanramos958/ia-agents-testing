@@ -14,6 +14,7 @@ import json
 import logging
 import asyncio
 import os
+import psycopg
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langgraph.prebuilt import create_react_agent
 from langgraph.prebuilt.tool_node import ToolNode
@@ -429,6 +430,169 @@ def get_tools_for_role(role: str) -> list:
 
 # ── Agent creation ────────────────────────────────────────────────────────────
 
+
+def trim_hook(state: dict) -> dict:
+    """
+    Sanitiza y limita el historial antes de cada llamada al LLM.
+
+    Problemas que resuelve:
+    1. SystemMessages acumulados: cada ainvoke() inyecta un SystemMessage nuevo al
+       checkpoint. Sin este fix, N llamadas = N SystemMessages en el historial,
+       inflando el contexto innecesariamente. Se conserva solo el más reciente.
+    2. ToolMessages huérfanos: si el trim corta un AIMessage con tool_calls
+       pero deja sus ToolMessages correspondientes, Groq los rechaza (400).
+    3. ToolMessage con content vacío: Groq requiere string no vacío.
+    4. Crecimiento ilimitado del contexto: limita a N mensajes no-sistema
+       (N = settings.chat_history_trim_limit, default 8).
+    5. AIMessage con tool_calls pendiente: si el trim cortaría un AIMessage
+       con tool_calls que aún no tiene ToolMessage (estado de "esperando
+       confirmación del usuario"), la ventana se expande hacia atrás para
+       incluirlo. Sin esto, el LLM olvida qué acción acaba de proponer y el
+       "confirmo" del usuario produce respuestas incoherentes (bug
+       conv-creador-018, turno 6).
+
+    Module-level (no closure) para que sea testeable directamente desde los
+    tests de regresión sin tener que instanciar el agente completo.
+    """
+    from langchain_core.messages import (
+        SystemMessage as _SM,
+        AIMessage as _AI,
+        ToolMessage as _TM,
+        HumanMessage as _HM,
+    )
+
+    msgs = state["messages"]
+
+    # Fix #1: keep only the MOST RECENT SystemMessage.
+    all_system = [m for m in msgs if isinstance(m, _SM)]
+    system = [all_system[-1]] if all_system else []
+    non_system = [m for m in msgs if not isinstance(m, _SM)]
+
+    # Paso 1: corta a los últimos N mensajes (configurable via settings.chat_history_trim_limit)
+    trim_limit = settings.chat_history_trim_limit
+    window = non_system[-trim_limit:] if len(non_system) > trim_limit else non_system
+
+    # Paso 1.5 (Fix #5): protege cualquier AIMessage con tool_calls pendiente
+    # que haya quedado fuera de la ventana tras el Paso 1.
+    #
+    # Caso de uso (bug conv-creador-018, turno 6): el agente propuso
+    # create_ticket en turno N (AIMessage con tool_calls). El usuario agregó
+    # varios mensajes de aclaración después. Cuando el usuario dice "confirmo",
+    # el trim hook corre, la ventana toma los últimos N mensajes, pero el
+    # AIMessage con la propuesta se quedó atrás. El LLM pierde contexto y
+    # responde con el saludo en vez de confirmar.
+    #
+    # Lógica: buscar en TODO non_system el primer AIMessage con tool_calls
+    # que NO tenga ToolMessage correspondiente. Si su índice está fuera de
+    # la ventana, expandirla hacia atrás para incluirlo (junto con el
+    # HumanMessage inmediatamente anterior, que es lo que disparó la acción).
+    if len(non_system) > trim_limit:
+        protected_ai_idx = None
+        for j in range(len(non_system) - 1, -1, -1):
+            m = non_system[j]
+            if isinstance(m, _AI) and getattr(m, "tool_calls", None):
+                old_tc_ids = {tc["id"] for tc in m.tool_calls}
+                responded = any(
+                    isinstance(x, _TM)
+                    and getattr(x, "tool_call_id", None) in old_tc_ids
+                    for x in non_system[j + 1:]
+                )
+                if not responded:
+                    protected_ai_idx = j
+                    break
+
+        if protected_ai_idx is not None:
+            # Encontrar el HumanMessage inmediatamente anterior (si existe)
+            # para que el LLM tenga contexto del usuario que pidió la acción.
+            start_idx = protected_ai_idx
+            for k in range(protected_ai_idx - 1, -1, -1):
+                if isinstance(non_system[k], _HM):
+                    start_idx = k
+                    break
+
+            window_start_idx = len(non_system) - len(window)
+            if protected_ai_idx < window_start_idx:
+                # El AIMessage protegido está FUERA de la ventana → expandir
+                window = non_system[start_idx:] if start_idx > 0 else non_system
+                _log.info(
+                    "trim_hook: protected AIMessage with pending tool_calls "
+                    "at idx=%d, expanded window to %d msgs (was %d)",
+                    protected_ai_idx, len(window), trim_limit,
+                )
+
+    # Paso 2: detecta ToolMessages huérfanos al inicio de la ventana.
+    safe_start = 0
+    for i, m in enumerate(window):
+        if isinstance(m, _TM):
+            has_parent = any(
+                isinstance(window[j], _AI) and getattr(window[j], "tool_calls", None)
+                for j in range(i)
+            )
+            if not has_parent:
+                for k in range(i, len(window)):
+                    if isinstance(window[k], _HM):
+                        safe_start = k
+                        break
+                break
+
+    window = window[safe_start:]
+
+    # Paso 3: sanea ToolMessages con content vacío o None (Groq rechaza content vacío)
+    # y trunca ToolMessages demasiado largos para mantener el contexto dentro de límites.
+    max_chars = settings.tool_message_max_chars
+    sanitized = []
+    truncated_count = 0
+    for m in window:
+        if isinstance(m, _TM):
+            if not m.content:
+                m = m.model_copy(update={"content": "[sin resultado]"})
+            elif hasattr(m, "content") and isinstance(m.content, str) and len(m.content) > max_chars:
+                truncated_len = len(m.content)
+                m = m.model_copy(update={
+                    "content": m.content[:max_chars] + f"\n\n[truncado — {truncated_len} caracteres totales]"
+                })
+                truncated_count += 1
+        sanitized.append(m)
+
+    # NOTA: NO eliminamos AIMessages con tool_calls sin ToolMessage correspondiente.
+    # Cuando el grafo se interrumpe con `interrupt_before=["tools"]` (human-in-the-loop),
+    # el último mensaje ES un AIMessage con tool_calls que aún no tienen ToolMessage.
+    # Si lo eliminamos, el LLM "olvida" que ya emitió la acción y repite mensajes
+    # anteriores, rompiendo el flujo de confirmación.
+    # Los ToolMessages huérfanos (sin padre AIMessage) ya se manejan en Paso 2.
+
+    # ── Diagnostic log ───────────────────────────────────────────────────
+    def _est_tokens(msgs: list) -> int:
+        """Estimate token count from message content.
+
+        LangChain messages can have content as str or list[dict].
+        ~4 chars per token is a reasonable heuristic for mixed
+        Spanish/English technical text.
+        """
+        total = 0
+        for m in msgs:
+            c = getattr(m, "content", None)
+            if isinstance(c, str):
+                total += len(c) // 4
+            elif isinstance(c, list):
+                for block in c:
+                    if isinstance(block, dict):
+                        total += len(str(block.get("text", "") or "")) // 4
+        return total
+
+    non_system_tokens = _est_tokens(non_system)
+    system_tokens = _est_tokens(system)
+    final_tokens = _est_tokens(sanitized)
+    _log.info(
+        "trim_hook: %d→%d non-system msgs | tokens: %d→%d | "
+        "system: %d | truncated TM: %d | total_sending: %d",
+        len(non_system), len(sanitized), non_system_tokens, final_tokens,
+        system_tokens, truncated_count, system_tokens + final_tokens,
+    )
+
+    return {"messages": system + sanitized}
+
+
 def create_agent(tools: list, interrupt_before: list = None):
     """
     Builds and compiles a LangGraph ReAct agent with the given tools.
@@ -442,85 +606,14 @@ def create_agent(tools: list, interrupt_before: list = None):
             caller to confirm before the tools execute. Pass None (default)
             for a fully automated flow.
 
-    pre_model_hook (_trim_hook):
+    pre_model_hook (trim_hook, see function below):
     - Mantiene solo el SystemMessage más reciente (evita acumulación entre turnos).
-    - Limita el historial a los últimos 8 mensajes no-sistema.
+    - Limita el historial a los últimos N mensajes no-sistema
+      (N = settings.chat_history_trim_limit, default 8).
+    - PROTEGE cualquier AIMessage con tool_calls pendiente (esperando
+      confirmación del usuario): nunca se recorta aunque exceda el límite.
     - Repara ToolMessages huérfanos y vacíos que Groq rechaza.
     """
-    from langchain_core.messages import SystemMessage as _SM, AIMessage as _AI, ToolMessage as _TM
-
-    def _trim_hook(state):
-        """
-        Sanitiza y limita el historial antes de cada llamada al LLM.
-
-        Problemas que resuelve:
-        1. SystemMessages acumulados: cada ainvoke() inyecta un SystemMessage nuevo al
-           checkpoint. Sin este fix, N llamadas = N SystemMessages en el historial,
-           inflando el contexto innecesariamente. Se conserva solo el más reciente.
-        2. ToolMessages huérfanos: si el trim corta un AIMessage con tool_calls
-           pero deja sus ToolMessages correspondientes, Groq los rechaza (400).
-        3. ToolMessage con content vacío: Groq requiere string no vacío.
-        4. Crecimiento ilimitado del contexto: limita a 8 mensajes no-sistema.
-        """
-        from langchain_core.messages import HumanMessage as _HM
-        msgs = state["messages"]
-
-        # Fix #5: keep only the MOST RECENT SystemMessage.
-        # Each ainvoke/astream_events call appends a new SystemMessage to the checkpoint.
-        # Collecting all of them inflates context on every turn — keep only the last.
-        all_system = [m for m in msgs if isinstance(m, _SM)]
-        system = [all_system[-1]] if all_system else []
-        non_system = [m for m in msgs if not isinstance(m, _SM)]
-
-        # Paso 1: corta a los últimos N mensajes (configurable via settings.chat_history_trim_limit)
-        trim_limit = settings.chat_history_trim_limit
-        window = non_system[-trim_limit:] if len(non_system) > trim_limit else non_system
-
-        # Paso 2: detecta ToolMessages huérfanos al inicio de la ventana.
-        # Un TM es huérfano si no hay ningún AIMessage con tool_calls antes de él.
-        safe_start = 0
-        for i, m in enumerate(window):
-            if isinstance(m, _TM):
-                has_parent = any(
-                    isinstance(window[j], _AI) and getattr(window[j], "tool_calls", None)
-                    for j in range(i)
-                )
-                if not has_parent:
-                    for k in range(i, len(window)):
-                        if isinstance(window[k], _HM):
-                            safe_start = k
-                            break
-                    break
-
-        window = window[safe_start:]
-
-        # Paso 3: sanea ToolMessages con content vacío o None (Groq rechaza content vacío).
-        sanitized = []
-        for m in window:
-            if isinstance(m, _TM) and not m.content:
-                m = m.model_copy(update={"content": "[sin resultado]"})
-            sanitized.append(m)
-
-        # Paso 4: elimina AIMessages con tool_calls sin ToolMessage correspondiente.
-        # Ocurre cuando una tool crashea antes de devolver resultado.
-        clean = []
-        for i, m in enumerate(sanitized):
-            if isinstance(m, _AI) and getattr(m, "tool_calls", None):
-                expected_ids = {tc["id"] for tc in m.tool_calls}
-                following_ids = {
-                    r.tool_call_id
-                    for r in sanitized[i + 1:]
-                    if isinstance(r, _TM) and hasattr(r, "tool_call_id")
-                }
-                if not expected_ids.issubset(following_ids):
-                    break
-            clean.append(m)
-        sanitized = clean
-
-        _log.debug("trim_hook: %d messages -> sending %d", len(non_system), len(sanitized))
-
-        return {"messages": system + sanitized}
-
     llm = build_llm()
     checkpointer = build_checkpointer()
     tool_node = ToolNode(tools, handle_tool_errors=True)
@@ -528,12 +621,117 @@ def create_agent(tools: list, interrupt_before: list = None):
         model=llm,
         tools=tool_node,
         checkpointer=checkpointer,
-        pre_model_hook=_trim_hook,
+        pre_model_hook=trim_hook,
         interrupt_before=interrupt_before,
     )
 
 
 # ── Shared pre-flight logic ───────────────────────────────────────────────────
+
+
+async def _prefetch_catalogs(user_role: str) -> str:
+    """
+    Pre-fetch catalog data before the LLM invocation so the LLM doesn't
+    need to emit read-only tool_calls. Returns formatted text to inject
+    into the system prompt.
+
+    This eliminates N-1 pauses in the conversation: instead of the LLM
+    emitting catalog tool_calls → graph pauses → user confirms → tools
+    execute → LLM sees results, the catalogs are already available.
+    Only mutating tools (create_ticket, assign_ticket, etc.) cause
+    graph interruption.
+    """
+    if user_role == "creador":
+        return await _prefetch_creator_catalogs()
+    elif user_role == "supervisor":
+        return await _prefetch_supervisor_catalogs()
+    return ""
+
+
+async def _prefetch_creator_catalogs() -> str:
+    """Fetch ticket types, categories, urgencies, impacts, priorities."""
+    try:
+        # NOTE: These functions are decorated with @tool in tools/user_tools.py,
+        # which converts them into StructuredTool objects. We must call them via
+        # .ainvoke({}) — calling them directly (e.g. await get_ticket_types())
+        # raises "'StructuredTool' object is not callable".
+        types_raw = await get_ticket_types.ainvoke({})
+        cats_raw = await get_categories.ainvoke({})
+        urg_raw = await get_urgency_levels.ainvoke({})
+        imp_raw = await get_impact_levels.ainvoke({})
+        pri_raw = await get_priority_levels.ainvoke({})
+    except Exception as e:
+        # Pre-fetch is best-effort. Log as ERROR (not warning) so it surfaces
+        # in production — a silent pre-fetch means the LLM has no catalog data
+        # and the user experience degrades badly (repeated interruptions).
+        _log.error("prefetch_creator_catalogs_failed: %s", e, exc_info=True)
+        return ""
+
+    def _fmt(items: list) -> str:
+        """Format list of {id, name, ...} into a compact text block."""
+        if not items:
+            return "(no disponible)"
+        return "\n".join(
+            f"     {i['id']} = {i['name']}"
+            for i in items
+            if isinstance(i, dict) and "id" in i and "name" in i
+        )
+
+    return f"""
+## Catálogos del sistema (ya precargados — NO necesitas consultarlos)
+Úsalos directamente para clasificar el ticket. Los IDs son los números.
+
+**Tipos de ticket:**
+{_fmt(types_raw)}
+
+**Categorías (L1):**
+{_fmt(cats_raw)}
+
+**Niveles de urgencia:**
+{_fmt(urg_raw)}
+
+**Niveles de impacto:**
+{_fmt(imp_raw)}
+
+**Niveles de prioridad:**
+{_fmt(pri_raw)}
+"""
+
+
+async def _prefetch_supervisor_catalogs() -> str:
+    """Fetch resolvers, groups, stages."""
+    try:
+        # NOTE: These functions are decorated with @tool in tools/user_tools.py.
+        # Must be called via .ainvoke({}) — see _prefetch_creator_catalogs().
+        resolvers = await get_resolvers.ainvoke({})
+        groups = await get_agent_groups.ainvoke({})
+        stages = await get_stages.ainvoke({})
+    except Exception as e:
+        _log.error("prefetch_supervisor_catalogs_failed: %s", e, exc_info=True)
+        return ""
+
+    def _fmt(items: list) -> str:
+        if not items:
+            return "(no disponible)"
+        return "\n".join(
+            f"     {i['id']} = {i['name']}"
+            for i in items
+            if isinstance(i, dict) and "id" in i and "name" in i
+        )
+
+    return f"""
+## Agentes y grupos disponibles (ya precargados — NO necesitas consultarlos)
+
+**Agentes (resolvers):**
+{_fmt(resolvers)}
+
+**Grupos de soporte:**
+{_fmt(groups)}
+
+**Etapas del flujo:**
+{_fmt(stages)}
+"""
+
 
 async def _prepare_invocation(
     agent,
@@ -574,11 +772,22 @@ async def _prepare_invocation(
         if tickets_ctx:
             tickets_ctx = frame_external_data(tickets_ctx, "historial del usuario (Odoo)")
         system_content = system_content + tickets_ctx
+        # Pre-fetch catalog data so the LLM doesn't need to emit read-only tool_calls
+        catalog_ctx = await _prefetch_catalogs(user_role)
+        if catalog_ctx:
+            catalog_ctx = frame_external_data(catalog_ctx, "catálogos del sistema")
+        system_content = system_content + catalog_ctx
     elif user_role == "resueltor":
         tickets_ctx = await _fetch_resolver_context(user_id, thread_id)
         if tickets_ctx:
             tickets_ctx = frame_external_data(tickets_ctx, "tickets asignados (Odoo)")
         system_content = system_content + tickets_ctx
+    elif user_role == "supervisor":
+        # Pre-fetch resolvers and groups for supervisor
+        catalog_ctx = await _prefetch_catalogs(user_role)
+        if catalog_ctx:
+            catalog_ctx = frame_external_data(catalog_ctx, "agentes y grupos disponibles")
+        system_content = system_content + catalog_ctx
 
     config = {
         "configurable": {"thread_id": thread_id},
@@ -590,11 +799,17 @@ async def _prepare_invocation(
     # with tool_calls but no corresponding ToolMessage. On the next request,
     # LangGraph routes to the tools node BEFORE pre_model_hook can clean it up,
     # causing "INVALID_CHAT_HISTORY". We detect and reset the thread proactively.
+    #
+    # IMPORTANT: Do NOT reset if the graph is intentionally interrupted
+    # (state.next is non-empty → human-in-the-loop waiting for confirmation).
+    # Only reset if the thread is truly corrupted (not interrupted, just orphaned).
     try:
         state = await agent.aget_state(config)
         if state and state.values.get("messages"):
             last_msg = state.values["messages"][-1]
-            if isinstance(last_msg, AIMessage) and getattr(last_msg, "tool_calls", None):
+            has_tool_calls = isinstance(last_msg, AIMessage) and getattr(last_msg, "tool_calls", None)
+            is_interrupted = bool(state.next)
+            if has_tool_calls and not is_interrupted:
                 import time as _time
                 fresh_thread = f"{thread_id}-r{int(_time.time())}"
                 _log.warning(
@@ -811,17 +1026,30 @@ def _pending_reply_text(result: dict, pending: list) -> str:
     Return a human-readable reply when the graph is awaiting confirmation.
 
     If the LLM provided text content in its tool-call message (e.g.
-    "Voy a crear un ticket de VPN, ¿confirmás?"), use that. Otherwise
-    generate a sensible default from the pending actions.
+    "Voy a crear el ticket..."), use ONLY that — don't append
+    the system-generated actions list. The LLM's natural language is
+    better than robotic lists. The pending_actions are available in
+    the JSON response for the frontend to display.
+
+    Only generate fallback text when the LLM provided NO content at all.
     """
     for msg in reversed(result.get("messages", [])):
         if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
             if msg.content:
+                # LLM already provided natural language — trust it.
                 return msg.content
-    # Fallback — LLM didn't provide text with its tool calls
+    # Fallback — LLM didn't provide text with its tool calls.
+    # Build a single natural sentence for the pending action.
     if len(pending) == 1:
-        return f"Necesito tu confirmación para: {pending[0]['description']}"
-    return f"Necesito tu confirmación para {len(pending)} acciones."
+        action = pending[0]
+        if action["tool_name"] == "create_ticket":
+            asunto = action["arguments"].get("asunto", "")
+            return f"Voy a crear el ticket: {asunto}\n\nResponde 'confirmo' para crearlo o 'rechazo' para cancelar."
+        return f"Voy a ejecutar: {action['description']}\n\nResponde 'confirmo' para continuar o 'rechazo' para cancelar."
+    actions_text = "\n".join(
+        f"  {i+1}. {a['description']}" for i, a in enumerate(pending)
+    )
+    return f"Voy a realizar las siguientes acciones:\n{actions_text}\n\nResponde 'confirmo' para ejecutar o 'rechazo' para cancelar."
 
 
 async def get_response(
@@ -858,6 +1086,49 @@ async def get_response(
 
     from core.context import current_user_id as _uid_var
     _uid_var.set(user_id)
+
+    # ── Text-based confirmation / rejection ────────────────────────────────
+    # If the graph is interrupted and the user says "confirmo" / "rechazo",
+    # handle it directly without running the LLM again.
+    try:
+        state = await agent.aget_state(config)
+        if state.next:
+            if _is_confirmation_message(user_message):
+                _log.info(
+                    "Text confirm detected user=%s thread=%s message=%r",
+                    user_id, thread_id, user_message,
+                )
+                return await resume_agent(agent, thread_id, user_id)
+            if _is_rejection_message(user_message):
+                _log.info(
+                    "Text reject detected user=%s thread=%s message=%r",
+                    user_id, thread_id, user_message,
+                )
+                return await reject_agent(agent, thread_id, user_id, reason=user_message)
+            # ── User sent a non-confirmation message while graph is paused ──
+            # The graph has orphaned tool_calls. Reset to a fresh thread so
+            # the LLM can process the new message without INVALID_CHAT_HISTORY.
+            # This is rare now — pre-fetched catalogs eliminate most read-only
+            # tool calls. Only suggest_solution may trigger this edge case.
+            import time as _time
+            fresh_thread = f"{thread_id}-r{int(_time.time())}"
+            _log.info(
+                "Resetting thread user=%s old=%s new=%s — "
+                "user sent non-confirmation while graph was interrupted",
+                user_id, thread_id, fresh_thread,
+            )
+            invalidate_creator_context(thread_id)
+            config = {"configurable": {"thread_id": fresh_thread}, "recursion_limit": 30}
+            # Preserve the system prompt from the original input_data
+            system_msg = input_data["messages"][0]
+            input_data = {
+                "messages": [
+                    system_msg,
+                    HumanMessage(content=user_message),
+                ]
+            }
+    except (psycopg.Error, ConnectionError, TimeoutError, RuntimeError) as _state_err:
+        _log.debug("Could not check graph state for text confirm: %s", _state_err)
 
     sem = _get_llm_semaphore()
     try:
@@ -966,12 +1237,45 @@ async def get_response(
 
     if graph_interrupted:
         pending = _extract_pending_actions(result)
-        reply = _pending_reply_text(result, pending)
-        _log.info(
-            "Graph interrupted user=%s thread=%s pending=%d",
-            user_id, thread_id, len(pending),
-        )
-        return {"reply": reply, "status": "pending_actions", "pending_actions": pending}
+
+        # ── Auto-confirm read-only tools ────────────────────────────────────
+        # Read-only tools (queries, lookups, feedback) should execute without
+        # bothering the user. Only mutating tools require explicit confirmation.
+        # We loop in case the LLM emits more read-only tools after seeing results.
+        if pending and all(p["tool_name"] in _READ_ONLY_TOOLS for p in pending):
+            _log.info(
+                "Auto-confirming read-only tools user=%s thread=%s pending=%d",
+                user_id, thread_id, len(pending),
+            )
+            max_auto_loops = 3
+            for loop in range(max_auto_loops):
+                result = await agent.ainvoke(None, config=config)
+                # Check if the graph completed or paused again
+                try:
+                    state = await agent.aget_state(config)
+                except (psycopg.Error, ConnectionError, TimeoutError, RuntimeError) as _state_err:
+                    _log.debug("Could not check auto-resume state: %s", _state_err)
+                    break
+                if not state.next:
+                    graph_interrupted = False
+                    break
+                pending = _extract_pending_actions_from_state(state)
+                if not pending or not all(p["tool_name"] in _READ_ONLY_TOOLS for p in pending):
+                    # Mutating tool appeared — stop auto-confirming
+                    break
+                _log.info(
+                    "Auto-confirming read-only tools (loop %d) user=%s thread=%s pending=%d",
+                    loop + 1, user_id, thread_id, len(pending),
+                )
+
+        if graph_interrupted:
+            pending = _extract_pending_actions(result)
+            reply = _pending_reply_text(result, pending)
+            _log.info(
+                "Graph interrupted user=%s thread=%s pending=%d",
+                user_id, thread_id, len(pending),
+            )
+            return {"reply": reply, "status": "pending_actions", "pending_actions": pending}
 
     # ── Invalidate creator context cache when create_ticket succeeds ──────
     # So the next message reflects the newly created ticket in the user's history.
@@ -1015,6 +1319,62 @@ async def get_response(
         "status": "ok",
         "pending_actions": [],
     }
+
+
+# ── Text-based confirmation detection ───────────────────────────────────────
+
+
+_CONFIRM_KEYWORDS = {"confirmo", "confirmar", "confirmado", "sí", "si", "ok", "okey", "oka", "okay", "vale", "dale", "adelante", "procede", "aprovado", "apruebo", "aprueba"}
+_REJECT_KEYWORDS = {"rechazo", "rechazar", "rechasa", "rechaso", "rechace", "rechacé", "cancelar", "cancela", "cancelo", "nope", "nop", "no.", "olvídalo", "olvida", "deshace", "no gracias", "no quiero"}
+
+# "no" is EXCLUDED intentionally — it's too common in Spanish conversation
+# ("no tengo", "no funciona", "no, probé..."). Use "rechazo" or "cancelar" instead.
+
+
+# ── Read-only tools (no human confirmation required) ──────────────────────────
+# These tools only READ data or record non-critical telemetry. They should NOT
+# pause the graph for human confirmation — doing so forces the user to type
+# "ok" for every query (get_my_created_tickets, get_ticket_detail, etc.).
+#
+# Mutating tools (create_ticket, assign_ticket, resolve_ticket, etc.) are NOT
+# in this set and will still require explicit confirmation.
+_READ_ONLY_TOOLS = {
+    # Ticket queries
+    "get_my_created_tickets",
+    "get_my_assigned_tickets",
+    "get_all_tickets",
+    "get_ticket_detail",
+    # Catalog queries
+    "get_ticket_types",
+    "get_categories",
+    "get_urgency_levels",
+    "get_impact_levels",
+    "get_priority_levels",
+    "get_resolvers",
+    "get_agent_groups",
+    "get_stages",
+    # RAG
+    "suggest_solution",
+    # Feedback is a user-provided rating — asking them to confirm their own
+    # rating is awkward. Treat it as read-only for confirmation purposes.
+    "record_agent_feedback",
+}
+
+
+def _is_confirmation_message(text: str) -> bool:
+    """Check if user text is a confirmation (case-insensitive, word-based)."""
+    words = set(text.lower().split())
+    return bool(words & _CONFIRM_KEYWORDS)
+
+
+def _is_rejection_message(text: str) -> bool:
+    """Check if user text is a rejection (case-insensitive, word-based)."""
+    t = text.lower().strip()
+    # "no" alone or very short messages with "no" are rejections
+    if t in ("no", "nop", "nope", "no.", "no!", "no gracias", "no quiero"):
+        return True
+    words = set(t.split())
+    return bool(words & _REJECT_KEYWORDS)
 
 
 # ── Graph resume (human-in-the-loop confirmation) ────────────────────────────
