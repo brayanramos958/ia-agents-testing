@@ -19,6 +19,14 @@ class Settings(BaseSettings):
     ai_gateway_model: str = "minimax/minimax-m2.7"
     ai_gateway_base_url: str = "https://ai-gateway.vercel.sh/v1"
 
+    # ── OpenCode Go (only used when llm_provider=opencode_go) ────────────────
+    # Low-cost subscription provider — $5 first month, $10/month after.
+    # https://opencode.ai/docs/es/go/
+    # OpenAI-compatible endpoint. Get your key at https://opencode.ai/auth
+    opencode_go_api_key: str = ""
+    opencode_go_model: str = "deepseek-v4-pro"
+    opencode_go_base_url: str = "https://opencode.ai/zen/go/v1"
+
     groq_api_key: str = ""
     llm_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
     openrouter_api_key: str = ""
@@ -158,6 +166,21 @@ class Settings(BaseSettings):
     # Tool results (e.g. suggest_solution, catalog queries) can be very large.
     # Truncating them keeps context within bounds without losing the signal.
     tool_message_max_chars: int = 2000
+
+    # ── Conversation resilience (rate-limit survival) ───────────────────────
+    # Seconds the agent keeps a thread "alive" after a failed LLM call so
+    # the user can resend the same message and continue the conversation.
+    # After this window, the next message starts a fresh conversation.
+    # Default: 120s (2 minutes) — long enough for a manual retry, short
+    # enough to avoid confusing two unrelated questions.
+    continuity_window_seconds: int = 120
+
+    # ── LLM retry on transient rate limits ──────────────────────────────────
+    # When the LLM provider returns 429/502/503, retry up to N times with
+    # exponential backoff. Applies to both /agent/chat and /agent/stream.
+    # Delays are in seconds, one entry per retry.
+    llm_max_retries: int = 3
+    llm_retry_delays: List[float] = [1.0, 2.0, 4.0]
 
     # ── Escalation thresholds (background scheduler) ────────────────────────
     # Hours of inactivity before a reminder is sent to the assigned agent.

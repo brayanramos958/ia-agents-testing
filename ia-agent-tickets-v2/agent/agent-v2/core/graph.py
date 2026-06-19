@@ -66,6 +66,55 @@ def _build_ollama_llm():
     return llm
 
 
+def _build_opencode_go_llm():
+    """
+    OpenCode Go — low-cost subscription provider.
+    https://opencode.ai/docs/es/go/
+
+    Endpoint: https://opencode.ai/zen/go/v1/chat/completions
+    Auth: Bearer token (the OpenCode Go API key from https://opencode.ai/auth)
+    Compatible: OpenAI Chat Completions API.
+
+    Notes:
+      - DeepSeek V4 Pro runs in "thinking mode" by default which:
+        1. Ignores tool definitions when tool_choice='auto'
+        2. Rejects tool_choice='any' with 400 Bad Request
+        We disable thinking via extra_body so tool calling works.
+      - The endpoint is rate-limited per subscription; the agent's
+        llm_max_retries (3) + llm_retry_delays ([1, 2, 4]) absorbs
+        transient 429s before failing.
+    """
+    if not settings.opencode_go_api_key:
+        raise RuntimeError(
+            "LLM_PROVIDER=opencode_go requires OPENCODE_GO_API_KEY to be set in .env.\n"
+            "Get your key at https://opencode.ai/auth (subscribe to OpenCode Go)."
+        )
+
+    # DeepSeek V4 Pro needs thinking mode disabled for tool calling.
+    extra_body = {}
+    if "deepseek" in settings.opencode_go_model.lower():
+        extra_body = {"thinking": {"type": "disabled"}}
+
+    llm = ChatOpenAI(
+        api_key=settings.opencode_go_api_key,
+        base_url=settings.opencode_go_base_url,
+        model=settings.opencode_go_model,
+        temperature=0.1,
+        timeout=60,
+        extra_body=extra_body,
+    )
+    _log.info(
+        "llm_init",
+        extra={
+            "provider": "opencode_go",
+            "model": settings.opencode_go_model,
+            "base_url": settings.opencode_go_base_url,
+            "thinking_disabled": bool(extra_body),
+        },
+    )
+    return llm
+
+
 def _build_groq_llm():
     """
     Primario: Groq meta-llama/llama-4-scout-17b-16e-instruct.
@@ -128,6 +177,9 @@ def build_llm():
     if settings.llm_provider == "vercel":
         get_provider_status(settings.ai_gateway_model)
         return _build_vercel_llm()
+    if settings.llm_provider == "opencode_go":
+        get_provider_status(settings.opencode_go_model)
+        return _build_opencode_go_llm()
     if settings.llm_provider == "ollama":
         get_provider_status(settings.ollama_model)
         return _build_ollama_llm()
