@@ -292,6 +292,111 @@ async def _fetch_resolver_context(user_id: int, thread_id: str) -> str:
     return result
 
 
+# ── LLM retry on transient failures ──────────────────────────────────────────
+# Free LLM providers (Vercel AI Gateway, Groq, OpenRouter) frequently return
+# 429 (rate limit) or 5xx (provider overload) when traffic spikes. We retry
+# with exponential backoff to absorb these transients without bothering the
+# user with a "system error" message.
+#
+# What gets retried:
+#   - RateLimitError (429)
+#   - APIStatusError with 5xx status (provider overload, gateway timeout)
+#   - TimeoutError, ConnectionError (network blips)
+#   - RuntimeError with "rate limit" / "429" in the message (catch-all for
+#     providers that don't expose typed exceptions, e.g. some OpenRouter models)
+#
+# What does NOT get retried:
+#   - ValueError, TypeError, AttributeError → real bugs, not transient.
+#   - 4xx (except 429) → auth/schema errors, retrying won't help.
+#   - Cancellation errors → caller asked to stop.
+
+# Tuple of exception types we treat as transient. The classes are imported
+# lazily inside _with_llm_retry() so unit tests can mock them without
+# requiring the OpenAI/Groq SDKs to be importable.
+_RETRYABLE_EXCEPTIONS: tuple = ()
+
+
+async def _with_llm_retry(coro_factory, op_name: str = "llm_call"):
+    """
+    Run an async callable with exponential backoff on transient LLM errors.
+
+    Args:
+        coro_factory: A zero-arg callable that returns a fresh coroutine each
+            time it is called. The factory is invoked once per attempt so
+            each retry gets a new coroutine.
+        op_name: Human-readable name for logging (e.g. "ainvoke", "astream").
+
+    Returns:
+        Whatever the coroutine returns on success.
+
+    Raises:
+        The last exception if all retries are exhausted, or immediately
+        for non-transient errors (ValueError, TypeError, etc.).
+    """
+    # Lazy import — the OpenAI/Groq SDKs may not be installed in tests.
+    from openai import RateLimitError as _RateLimit, APIStatusError as _APIStatus
+    from groq import RateLimitError as _GroqRateLimit
+
+    delays = settings.llm_retry_delays
+    max_retries = max(1, settings.llm_max_retries)
+    last_exc = None
+
+    for attempt in range(max_retries):
+        try:
+            return await coro_factory()
+        except (
+            _RateLimit, _GroqRateLimit,
+            _APIStatus,  # 5xx, 429
+            TimeoutError, ConnectionError,
+        ) as exc:
+            last_exc = exc
+            # 4xx (except 429) is NOT retried — those are real errors.
+            if isinstance(exc, _APIStatus) and exc.status_code and 400 <= exc.status_code < 500 and exc.status_code != 429:
+                _log.error(
+                    "llm_call_non_retryable_status op=%s status=%d error=%s",
+                    op_name, exc.status_code, exc,
+                )
+                raise
+            # Last attempt — re-raise the captured exception.
+            if attempt >= max_retries - 1:
+                _log.error(
+                    "llm_call_retries_exhausted op=%s attempts=%d error=%s",
+                    op_name, attempt + 1, exc,
+                )
+                raise
+            delay = delays[min(attempt, len(delays) - 1)]
+            _log.warning(
+                "llm_call_retry op=%s attempt=%d/%d delay=%.1fs error=%s",
+                op_name, attempt + 1, max_retries, delay, exc,
+            )
+            await asyncio.sleep(delay)
+        except RuntimeError as exc:
+            # Some providers wrap 429 in a generic RuntimeError. Inspect the
+            # message for known markers. This is best-effort — false positives
+            # just mean we retry once and then propagate.
+            msg = str(exc).lower()
+            if "429" in msg or "rate limit" in msg or "too many requests" in msg:
+                last_exc = exc
+                if attempt >= max_retries - 1:
+                    _log.error(
+                        "llm_call_retries_exhausted_runtime op=%s attempts=%d error=%s",
+                        op_name, attempt + 1, exc,
+                    )
+                    raise
+                delay = delays[min(attempt, len(delays) - 1)]
+                _log.warning(
+                    "llm_call_retry_runtime op=%s attempt=%d/%d delay=%.1fs error=%s",
+                    op_name, attempt + 1, max_retries, delay, exc,
+                )
+                await asyncio.sleep(delay)
+            else:
+                raise
+    # Should never reach here, but keep type-checkers happy.
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("with_llm_retry: unreachable")
+
+
 # ── Late imports (intentionally placed here, NOT at the top of the file) ─────
 # These modules form a dependency graph with core/agent.py:
 #   tools/* → ports/* → core/*
@@ -733,6 +838,76 @@ async def _prefetch_supervisor_catalogs() -> str:
 """
 
 
+async def _check_continuity(thread_id: str, user_message: str) -> dict:
+    """
+    Inspect thread_metadata to decide what to do with this new message.
+
+    Three outcomes:
+      - {"action": "fresh", "new_thread": str}
+          Window expired — caller should reset the conversation by switching
+          to a fresh thread_id. We also delete the old metadata.
+      - {"action": "duplicate"}
+          Same message within the window — caller should NOT add another
+          HumanMessage; just continue the existing thread (LangGraph
+          keeps the prior context, the LLM sees the same state and
+          produces a real reply).
+      - {"action": "continue"}
+          Normal flow — keep the thread, persist the new message.
+
+    The function is best-effort: any DB error returns {"action": "continue"}
+    so the user's request is never blocked by a metadata lookup failure.
+    """
+    from core.thread_state import (
+        get_thread_metadata,
+        delete_thread_metadata,
+        is_within_continuity_window,
+        is_duplicate_message,
+    )
+    from datetime import datetime as _dt, timezone as _tz
+
+    meta = await get_thread_metadata(thread_id)
+    if meta is None:
+        # No prior record — fresh conversation by definition.
+        return {"action": "continue"}
+
+    last_msg = meta.get("last_user_message")
+    last_at = meta.get("last_user_message_at")
+
+    if not is_within_continuity_window(last_at):
+        # Window expired — start a fresh thread, drop the old metadata.
+        _log.info(
+            "continuity_window_expired thread=%s last_at=%s",
+            thread_id, last_at,
+        )
+        await delete_thread_metadata(thread_id)
+        return {"action": "fresh"}
+
+    if is_duplicate_message(last_msg, user_message, last_at):
+        _log.info(
+            "duplicate_message_detected thread=%s message=%r",
+            thread_id, user_message[:80],
+        )
+        return {"action": "duplicate"}
+
+    return {"action": "continue"}
+
+
+async def _persist_user_message(thread_id: str, user_message: str) -> None:
+    """
+    Save the user message + timestamp to thread_metadata. Called AFTER the
+    LLM call succeeds so we only track messages that were actually delivered
+    to the agent. If the LLM fails, the previous metadata (if any) keeps
+    the window alive for a retry.
+    """
+    from core.thread_state import set_thread_metadata
+    from datetime import datetime as _dt, timezone as _tz
+    await set_thread_metadata(
+        thread_id=thread_id,
+        last_user_message=user_message,
+        last_user_message_at=_dt.now(_tz.utc),
+    )
+
+
 async def _prepare_invocation(
     agent,
     user_message: str,
@@ -740,7 +915,7 @@ async def _prepare_invocation(
     user_id: int,
     user_role: str,
     auto_confirm: bool = False,
-) -> tuple[dict, dict]:
+) -> tuple[dict, dict, dict]:
     """
     Builds input_data and config for an agent invocation.
 
@@ -832,7 +1007,23 @@ async def _prepare_invocation(
         ]
     }
 
-    return input_data, config
+    # Continuity info is a best-effort signal for the caller — when this is
+    # a duplicate message the caller may want to skip the HumanMessage
+    # (LangGraph will use the prior context from the checkpoint). We resolve
+    # it here to keep _prepare_invocation as the single decision point.
+    continuity = await _check_continuity(thread_id, user_message)
+    if continuity["action"] == "duplicate":
+        # The checkpoint already has the user's previous message. We send
+        # just a SystemMessage to nudge the LLM to re-evaluate and produce
+        # a real answer — but the LLM will see the full history via the
+        # pre_model_hook's trim_hook.
+        input_data = {
+            "messages": [
+                SystemMessage(content=system_content),
+            ]
+        }
+
+    return input_data, config, continuity
 
 
 # ── LLM usage tracking (Phase 3) ─────────────────────────────────────────────
@@ -1080,7 +1271,7 @@ async def get_response(
         auto_confirm: When True, the agent executes tools immediately without
             asking for confirmation. See _prepare_invocation() for details.
     """
-    input_data, config = await _prepare_invocation(
+    input_data, config, continuity = await _prepare_invocation(
         agent, user_message, thread_id, user_id, user_role, auto_confirm,
     )
 
@@ -1162,7 +1353,10 @@ async def get_response(
 
     try:
         _log.info("LLM call started user=%s thread=%s", user_id, thread_id)
-        result = await agent.ainvoke(input_data, config=config)
+        result = await _with_llm_retry(
+            lambda: agent.ainvoke(input_data, config=config),
+            op_name="ainvoke",
+        )
         # Record success in circuit breaker for the active provider.
         # This makes /agent/llm-status show real success/failure stats.
         from core.circuit_breaker import get_provider_status
@@ -1219,6 +1413,12 @@ async def get_response(
         "LLM call complete user=%s thread=%s tokens_in=%d tokens_out=%d cost=%.6f latency=%.0fms",
         user_id, thread_id, tokens_in, tokens_out, cost, elapsed_ms,
     )
+
+    # ── Persist user message in thread_metadata (conversation continuity) ─
+    # Only persisted AFTER the LLM call succeeds, so a failed LLM call
+    # doesn't extend the continuity window. The window stays alive via the
+    # previous metadata, allowing the user to retry within the window.
+    await _persist_user_message(thread_id, user_message)
 
     # ── Detect graph interruption (human-in-the-loop) ──────────────────────
     # When interrupt_before=["tools"] is active, LangGraph pauses after the
@@ -1854,7 +2054,7 @@ async def stream_response(
         auto_confirm: When True, the agent executes tools immediately without
             asking for confirmation.
     """
-    input_data, config = await _prepare_invocation(
+    input_data, config, _continuity = await _prepare_invocation(
         agent, user_message, thread_id, user_id, user_role, auto_confirm,
     )
 
@@ -1888,9 +2088,68 @@ async def stream_response(
     # to extract usage_metadata — the streaming path doesn't return a result dict.
     _stream_last_ai_msg = None
 
+    # ── Stream with retry on initial connection failures ────────────────────
+    # Once we start yielding tokens we cannot retry mid-stream (the client
+    # already received partial output). So the retry covers the initial
+    # connection / first-event failures only. If the LLM fails AFTER the
+    # first token, the partial stream is delivered and the user can resend
+    # the message — the thread_metadata check_continuity will treat the
+    # resend as a duplicate and the LLM will produce a complete answer.
+    from openai import RateLimitError as _StreamRateLimit, APIStatusError as _StreamAPIStatus
+    from groq import RateLimitError as _StreamGroqRateLimit
+
+    stream_delays = settings.llm_retry_delays
+    stream_max_retries = max(1, settings.llm_max_retries)
+    stream_event_iter = None
+    stream_last_exc = None
+
+    for stream_attempt in range(stream_max_retries):
+        try:
+            stream_event_iter = agent.astream_events(input_data, config, version="v2")
+            # Touch the iterator to surface connection errors before yielding
+            # anything to the client.
+            break
+        except (
+            _StreamRateLimit, _StreamGroqRateLimit,
+            _StreamAPIStatus,
+            TimeoutError, ConnectionError,
+        ) as exc:
+            stream_last_exc = exc
+            if isinstance(exc, _StreamAPIStatus) and exc.status_code and 400 <= exc.status_code < 500 and exc.status_code != 429:
+                _log.error("stream_non_retryable_status=%d", exc.status_code)
+                raise
+            if stream_attempt >= stream_max_retries - 1:
+                _log.error("stream_retries_exhausted attempts=%d", stream_attempt + 1)
+                raise
+            delay = stream_delays[min(stream_attempt, len(stream_delays) - 1)]
+            _log.warning(
+                "stream_retry attempt=%d/%d delay=%.1fs error=%s",
+                stream_attempt + 1, stream_max_retries, delay, exc,
+            )
+            await asyncio.sleep(delay)
+        except RuntimeError as exc:
+            msg = str(exc).lower()
+            if "429" in msg or "rate limit" in msg or "too many requests" in msg:
+                stream_last_exc = exc
+                if stream_attempt >= stream_max_retries - 1:
+                    raise
+                delay = stream_delays[min(stream_attempt, len(stream_delays) - 1)]
+                _log.warning(
+                    "stream_retry_runtime attempt=%d/%d delay=%.1fs error=%s",
+                    stream_attempt + 1, stream_max_retries, delay, exc,
+                )
+                await asyncio.sleep(delay)
+            else:
+                raise
+
+    if stream_event_iter is None:
+        if stream_last_exc:
+            raise stream_last_exc
+        raise RuntimeError("stream_response: failed to create event iterator")
+
     try:
         _log.info("LLM stream started user=%s thread=%s", user_id, thread_id)
-        async for event in agent.astream_events(input_data, config, version="v2"):
+        async for event in stream_event_iter:
             kind = event["event"]
 
             # ── Text token from LLM ──────────────────────────────────────────
@@ -1950,6 +2209,10 @@ async def stream_response(
             _log.debug("Could not check stream interruption: %s", _state_err)
 
         yield f"data: {json.dumps({'t': 'done'})}\n\n"
+
+        # ── Persist user message in thread_metadata (continuity) ──────────
+        # Stream completed without error — safe to record the message.
+        await _persist_user_message(thread_id, user_message)
 
     except Exception as exc:
         # Stream generator boundary: catch ALL exceptions and emit them as

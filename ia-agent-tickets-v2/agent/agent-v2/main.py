@@ -172,6 +172,11 @@ async def lifespan(app: FastAPI):
     await init_checkpointer()
     _log.info("checkpointer_ready", extra={"backend": settings.checkpoint_backend})
 
+    # thread_metadata table — sidecar persistence for conversation resilience
+    # (see core/thread_state.py for the full design).
+    from core.thread_state import init_thread_metadata_table
+    await init_thread_metadata_table()
+
     initialize_ports(_ticket_port, _rag_port)
 
     # Start the periodic RAG sync background task.
